@@ -35,7 +35,7 @@ Startup Radar stores and displays feed-provided metadata only: title, URL, autho
 - `scripts/apply-schema.mjs`: applies `db/schema.sql`.
 - `scripts/ingest-feeds.mjs`: deployment-safe multi-source RSS ingestion script.
 - `db/schema.sql`: database schema and indexes.
-- `render.yaml`: Render web service and Postgres database.
+- `render.yaml`: Render web service, 10-minute cron ingestion job, and Postgres database.
 
 ## Database Shape
 
@@ -53,13 +53,19 @@ Startup Radar stores and displays feed-provided metadata only: title, URL, autho
 
 ## Refresh Strategy
 
-The current Render Blueprint stays on the free web service plan, so it does not provision a paid Render Cron Job. Instead, the app uses:
+The Render Blueprint provisions a dedicated cron service:
+
+- `startup-radar-feed-cron`
+- schedule: `*/10 * * * *` in UTC
+- command: `npm run db:schema && npm run ingest:feeds`
+
+The web service also keeps fallback refresh paths:
 
 - startup ingestion: `npm run db:schema && npm run ingest:feeds`
 - request-triggered refresh: API/page requests ingest again when the oldest configured feed is more than 10 minutes stale
 - in-process refresh: once the web service is awake, a lightweight timer checks the same 10-minute throttle
 
-This keeps the public page fresh while avoiding billing changes.
+This lets the database update even when the public web service is idle, while keeping the page resilient if a cron run is delayed.
 
 ## Next Step
 
