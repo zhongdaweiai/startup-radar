@@ -9,7 +9,7 @@ Startup Radar is a live startup intelligence surface. The current version is a G
 - Clusters similar article titles into one story with multiple source links.
 - Stores news links, metadata, fetch runs, and categories in Postgres.
 - Serves news through `/api/news` for live search and refresh.
-- Refreshes feeds on startup and through a 10-minute request/background fallback while the Render web instance is awake.
+- Refreshes feeds every 30 minutes through Render Cron, with startup and request/background fallbacks.
 
 ## Local Development
 
@@ -36,14 +36,15 @@ npm run ingest:feeds
 
 The web service runs schema setup and one ingestion pass on startup, then serves the Next.js app.
 
-The app keeps a request-triggered fallback as well. If the web service is awake and sees stale feed data, it can refresh configured feeds at most once every 10 minutes.
+The app keeps a request-triggered fallback as well. If the web service is awake and sees stale feed data, it can refresh configured feeds at most once every 30 minutes.
 
 Refresh paths:
 
+- Render Cron Job every 30 minutes
 - startup ingestion pass
-- in-process/request-triggered 10-minute refresh once the web service is awake
+- in-process/request-triggered 30-minute refresh once the web service is awake
 
-A paid Render Cron Job is planned but not currently provisioned. See `docs/render-cron-plan.md` for the exact `render.yaml` block to enable after billing/account setup is ready.
+See `docs/render-cron-plan.md` for Cron deployment details.
 ## Data Model
 
 The database schema is in `db/schema.sql`.

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { NewsRefreshStatus } from "@/lib/news";
 
 export type NewsItem = {
   id: string;
@@ -26,6 +27,7 @@ export type NewsSourceLink = {
 type NewsStreamProps = {
   initialItems: NewsItem[];
   initialQuery: string;
+  initialRefreshStatus: NewsRefreshStatus;
 };
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", {
@@ -37,10 +39,26 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", {
 
 function formatTimestamp(value: string | null) {
   if (!value) {
-    return "new";
+    return "not checked yet";
   }
 
   return dateFormatter.format(new Date(value));
+}
+
+function statusLabel(status: NewsRefreshStatus) {
+  if (status.latestStatus === "failed") {
+    return "Last check failed";
+  }
+
+  if (status.latestStatus === "running") {
+    return "Checking feeds";
+  }
+
+  if (status.latestStatus === "preview") {
+    return "Live RSS preview";
+  }
+
+  return `${status.configuredFeedCount} feeds tracked`;
 }
 
 function itemKey(item: NewsItem) {
@@ -65,11 +83,15 @@ function sourceLabel(item: NewsItem) {
   return `${names.length} sources`;
 }
 
-export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
+export function NewsStream({
+  initialItems,
+  initialQuery,
+  initialRefreshStatus,
+}: NewsStreamProps) {
   const [query, setQuery] = useState(initialQuery);
   const [items, setItems] = useState(initialItems);
+  const [refreshStatus, setRefreshStatus] = useState(initialRefreshStatus);
   const [isLoading, setIsLoading] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState(new Date());
   const [visibleCount, setVisibleCount] = useState(30);
 
   const normalizedQuery = query.trim();
@@ -94,10 +116,13 @@ export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
           throw new Error("Unable to refresh news");
         }
 
-        const payload = (await response.json()) as { items: NewsItem[] };
+        const payload = (await response.json()) as {
+          items: NewsItem[];
+          refreshStatus: NewsRefreshStatus;
+        };
         setItems(payload.items);
+        setRefreshStatus(payload.refreshStatus);
         setVisibleCount(30);
-        setLastUpdated(new Date());
       } catch (error) {
         if (!controller.signal.aborted) {
           console.error(error);
@@ -127,9 +152,12 @@ export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
           return;
         }
 
-        const payload = (await response.json()) as { items: NewsItem[] };
+        const payload = (await response.json()) as {
+          items: NewsItem[];
+          refreshStatus: NewsRefreshStatus;
+        };
         setItems(payload.items);
-        setLastUpdated(new Date());
+        setRefreshStatus(payload.refreshStatus);
       } catch (error) {
         console.error(error);
       }
@@ -187,7 +215,8 @@ export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
             Live TechCrunch + VentureBeat feed
           </span>
           <span>{items.length} stories loaded</span>
-          <span>Updated {dateFormatter.format(lastUpdated)}</span>
+          <span>Feed checked {formatTimestamp(refreshStatus.lastAttemptAt)}</span>
+          <span>{statusLabel(refreshStatus)}</span>
           {isLoading ? <span>Searching...</span> : null}
         </div>
       </header>

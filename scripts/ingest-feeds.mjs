@@ -96,6 +96,7 @@ const STOP_WORDS = new Set([
 
 const SHORT_TERMS = new Set(["ai", "ar", "vr", "vc", "ipo", "llm", "aws", "ios"]);
 const STORY_LOOKBACK_DAYS = 7;
+const FEED_FETCH_TIMEOUT_MS = 30 * 1000;
 
 if (!process.env.DATABASE_URL) {
   console.log("DATABASE_URL is not set; skipping feed ingestion.");
@@ -115,6 +116,28 @@ const parser = new Parser();
 
 function clean(value) {
   return value?.replace(/\s+/g, " ").trim() || null;
+}
+
+async function parseFeedUrl(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FEED_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": "Startup Radar feed ingestion (+https://startup-radar-live.onrender.com/)",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Feed request failed with ${response.status}`);
+    }
+
+    return parser.parseString(await response.text());
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function dateOrNull(value) {
@@ -377,7 +400,7 @@ async function ingestFeed(source, sourceRecordId, feed) {
   const runId = run.rows[0].id;
 
   try {
-    const parsed = await parser.parseURL(feed.url);
+    const parsed = await parseFeedUrl(feed.url);
     let upserted = 0;
 
     for (const item of parsed.items) {

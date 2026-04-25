@@ -39,6 +39,16 @@ type IngestResult = {
   insertedOrUpdated: number;
 };
 
+export type NewsRefreshStatus = {
+  lastAttemptAt: string | null;
+  lastSuccessfulAttemptAt: string | null;
+  latestStatus: "success" | "failed" | "running" | "preview" | null;
+  lastError: string | null;
+  configuredFeedCount: number;
+  staleFeedCount: number;
+  oldestFeedFetchAt: string | null;
+};
+
 type ArticlePreview = NewsSourceLink & {
   categories: string[];
 };
@@ -64,7 +74,8 @@ type StoryCandidateRow = {
   storyTerms: string[] | null;
 };
 
-const FEED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const FEED_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const FEED_FETCH_TIMEOUT_MS = 30 * 1000;
 const STORY_LOOKBACK_DAYS = 7;
 
 const DEFAULT_SOURCES: SourceDefinition[] = [
@@ -261,6 +272,30 @@ function normalizeCategories(item: RssItem, feed: FeedDefinition) {
   return Array.from(categories);
 }
 
+async function parseFeedUrl(url: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FEED_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "user-agent": "Startup Radar feed ingestion (+https://startup-radar-live.onrender.com/)",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Feed request failed with ${response.status}`);
+    }
+
+    const xml = await response.text();
+    const parser = new Parser();
+    return parser.parseString(xml);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function itemAuthor(item: RssItem) {
   return (
     normalizeText(item.creator) ??
@@ -418,8 +453,7 @@ function startBackgroundRefresh() {
 }
 
 async function fetchFeedPreview(source: SourceDefinition, feed: FeedDefinition) {
-  const parser = new Parser();
-  const parsed = await parser.parseURL(feed.url);
+  const parsed = await parseFeedUrl(feed.url);
 
   return parsed.items
     .map((item) => {
@@ -723,11 +757,10 @@ async function ingestFeed(
   }
 
   return recordFeedRun(activePool, feedId, async (runId) => {
-    const parser = new Parser();
     let feedInsertedOrUpdated = 0;
 
     try {
-      const parsed = await parser.parseURL(feed.url);
+      const parsed = await parseFeedUrl(feed.url);
 
       for (const item of parsed.items as RssItem[]) {
         const title = normalizeText(item.title);
@@ -895,6 +928,86 @@ export async function ingestNewsFeeds() {
 
 export async function ingestTechCrunchFeeds() {
   return ingestNewsFeeds();
+}
+
+export async function getNewsRefreshStatus(): Promise<NewsRefreshStatus> {
+  const activePool = getPool();
+  const configuredFeedCount = getSourceDefinitions().reduce(
+    (count, source) => count + source.feeds.length,
+    0,
+  );
+
+  if (!activePool) {
+    return {
+      lastAttemptAt: new Date().toISOString(),
+      lastSuccessfulAttemptAt: new Date().toISOString(),
+      latestStatus: "preview",
+      lastError: null,
+      configuredFeedCount,
+      staleFeedCount: 0,
+      oldestFeedFetchAt: null,
+    };
+  }
+
+  await ensureSchema();
+
+  const feedUrls = getSourceDefinitions().flatMap((source) =>
+    source.feeds.map((feed) => feed.url),
+  );
+
+  const [runResult, feedResult] = await Promise.all([
+    activePool.query<{
+      lastAttemptAt: Date | string | null;
+      lastSuccessfulAttemptAt: Date | string | null;
+      latestStatus: "success" | "failed" | "running" | null;
+      lastError: string | null;
+    }>(
+      `
+        WITH latest_run AS (
+          SELECT status, error_message
+          FROM fetch_runs
+          ORDER BY started_at DESC
+          LIMIT 1
+        )
+        SELECT
+          max(fetch_runs.finished_at) AS "lastAttemptAt",
+          max(fetch_runs.finished_at) FILTER (WHERE fetch_runs.status = 'success') AS "lastSuccessfulAttemptAt",
+          (SELECT latest_run.status FROM latest_run) AS "latestStatus",
+          (SELECT latest_run.error_message FROM latest_run) AS "lastError"
+        FROM fetch_runs
+      `,
+    ),
+    activePool.query<{
+      staleFeedCount: string;
+      oldestFeedFetchAt: Date | string | null;
+    }>(
+      `
+        SELECT
+          count(*) FILTER (
+            WHERE source_feeds.last_fetched_at IS NULL
+              OR source_feeds.last_fetched_at < now() - interval '30 minutes'
+          )::text AS "staleFeedCount",
+          min(source_feeds.last_fetched_at) AS "oldestFeedFetchAt"
+        FROM source_feeds
+        WHERE source_feeds.feed_url = ANY($1)
+          AND source_feeds.active = true
+      `,
+      [feedUrls],
+    ),
+  ]);
+
+  const run = runResult.rows[0];
+  const feeds = feedResult.rows[0];
+
+  return {
+    lastAttemptAt: iso(run?.lastAttemptAt ?? null),
+    lastSuccessfulAttemptAt: iso(run?.lastSuccessfulAttemptAt ?? null),
+    latestStatus: run?.latestStatus ?? null,
+    lastError: run?.lastError ?? null,
+    configuredFeedCount,
+    staleFeedCount: Number(feeds?.staleFeedCount ?? 0),
+    oldestFeedFetchAt: iso(feeds?.oldestFeedFetchAt ?? null),
+  };
 }
 
 function iso(value: Date | string | null) {

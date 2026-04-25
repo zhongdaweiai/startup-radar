@@ -1,27 +1,29 @@
-# Planned Render Cron Ingestion
+# Render Cron Ingestion
 
-This project is ready for a dedicated Render Cron Job, but the cron service is not active yet because it is a paid Render resource.
+This project uses a dedicated Render Cron Job for feed ingestion. It is a paid Render resource.
 
-## Current Decision
+## Current Configuration
 
-- Do not add the cron service to the active `render.yaml` until the account owner confirms billing is ready.
-- Keep using the web service startup ingestion plus request/background refresh fallback.
-- Preserve this plan so a future AI agent can enable the cron without rediscovering the Render configuration.
+- service: `startup-radar-feed-cron`
+- plan: `starter`
+- schedule: `*/30 * * * *`
+- command: `npm run db:schema && npm run ingest:feeds`
+- cadence: every 30 minutes in UTC
 
 ## Why Cron Is Useful
 
-Render free web services can spin down when idle. When the web service is asleep, the in-process refresh timer does not run. A cron service solves this by running feed ingestion independently every 10 minutes and writing directly to the shared Postgres database.
+Render free web services can spin down when idle. When the web service is asleep, the in-process refresh timer does not run. A cron service solves this by running feed ingestion independently every 30 minutes and writing directly to the shared Postgres database.
 
-## Planned Service
+## Service Block
 
-Add this block under the top-level `services:` list in `render.yaml`, after `startup-radar-live`:
+This block belongs under the top-level `services:` list in `render.yaml`, after `startup-radar-live`:
 
 ```yaml
   - type: cron
     name: startup-radar-feed-cron
     runtime: node
     plan: starter
-    schedule: "*/10 * * * *"
+    schedule: "*/30 * * * *"
     buildCommand: npm ci
     startCommand: npm run db:schema && npm run ingest:feeds
     autoDeployTrigger: commit
@@ -38,19 +40,19 @@ Add this block under the top-level `services:` list in `render.yaml`, after `sta
         value: https://venturebeat.com/feed/,https://venturebeat.com/category/ai/feed/,https://venturebeat.com/category/business/feed/
 ```
 
-The schedule is UTC. `*/10 * * * *` means every 10 minutes.
+The schedule is UTC. `*/30 * * * *` means every 30 minutes.
 
-## Enable Checklist
+## Deploy Checklist
 
-1. Confirm with the account owner that Render billing is ready for a paid cron service.
-2. Add the planned service block to `render.yaml`.
-3. Run `ruby -e 'require "yaml"; YAML.load_file("render.yaml"); puts "render.yaml ok"'`.
-4. Run `npm run lint` and `npm run build`.
-5. Commit and push the change.
-6. In the Render Blueprint, sync the latest commit and approve the new cron resource.
-7. Open the cron service in Render and trigger one manual run.
-8. Verify `/api/news?limit=20` still returns story objects with `sources`, including TechCrunch and VentureBeat links.
+1. Run `ruby -e 'require "yaml"; YAML.load_file("render.yaml"); puts "render.yaml ok"'`.
+2. Run `npm run lint` and `npm run build`.
+3. Commit and push the change.
+4. In the Render Blueprint, sync the latest commit and approve the new cron resource.
+5. Open the cron service in Render and trigger one manual run.
+6. Verify `/api/news?limit=20` returns story objects with `sources`, including `refreshStatus.lastAttemptAt`.
 
 ## Important Script Detail
 
 `scripts/ingest-feeds.mjs` explicitly exits after closing the Postgres pool. This matters because Render Cron bills while the command is running, and a cron command must finish cleanly after ingestion.
+
+Each feed fetch has a 30-second timeout. With the current five feeds, even a bad network run should finish in a few minutes instead of hanging indefinitely.

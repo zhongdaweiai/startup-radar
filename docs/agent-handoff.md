@@ -34,8 +34,10 @@ Feed URLs are configured in `render.yaml` through `TECHCRUNCH_FEEDS` and `VENTUR
 - `npm run db:schema` applies `db/schema.sql`.
 - `npm run ingest:feeds` ingests all configured feeds into Postgres.
 - The Render web `startCommand` runs schema setup, one ingestion pass, then `next start`.
-- The app has a 10-minute stale-data check in the request path and a lightweight in-process background refresh while the web service is awake.
-- A paid Render Cron Job is planned but intentionally not active. See `docs/render-cron-plan.md`.
+- The app has a 30-minute stale-data check in the request path and a lightweight in-process background refresh while the web service is awake.
+- A paid Render Cron Job named `startup-radar-feed-cron` runs feed ingestion every 30 minutes. See `docs/render-cron-plan.md`.
+- The homepage displays `refreshStatus.lastAttemptAt` as the latest feed check time, so operators can see that ingestion ran even when no new stories were inserted.
+- Feed requests have a 30-second timeout to cap cron runtime and billing risk when a publisher endpoint hangs.
 
 ## Data Model
 
@@ -63,6 +65,15 @@ Story clustering is currently simple lexical matching in `lib/news.ts` and `scri
 
 ```json
 {
+  "refreshStatus": {
+    "lastAttemptAt": "2026-04-25T22:30:00.000Z",
+    "lastSuccessfulAttemptAt": "2026-04-25T22:30:00.000Z",
+    "latestStatus": "success",
+    "lastError": null,
+    "configuredFeedCount": 5,
+    "staleFeedCount": 0,
+    "oldestFeedFetchAt": "2026-04-25T22:29:58.000Z"
+  },
   "items": [
     {
       "id": "story-1",
@@ -106,7 +117,7 @@ ruby -e 'require "yaml"; YAML.load_file("render.yaml"); puts "render.yaml ok"'
 For live verification:
 
 ```bash
-node -e "fetch('https://startup-radar-live.onrender.com/api/news?limit=20').then(async r => { const body = await r.text(); const data = JSON.parse(body); console.log(r.status); console.log(Object.keys(data.items?.[0] || {})); console.log(body.includes('VentureBeat')); })"
+node -e "fetch('https://startup-radar-live.onrender.com/api/news?limit=20').then(async r => { const body = await r.text(); const data = JSON.parse(body); console.log(r.status); console.log(Object.keys(data.items?.[0] || {})); console.log(data.refreshStatus); console.log(body.includes('VentureBeat')); })"
 ```
 
 ## Recent Completed Work
@@ -125,4 +136,4 @@ node -e "fetch('https://startup-radar-live.onrender.com/api/news?limit=20').then
 - Add company/entity extraction and sector tags.
 - Add story summaries and signal scoring.
 - Add a backstage admin/debug page for fetch runs and source health.
-- Enable the paid Render Cron Job after billing is ready.
+- Monitor the paid Render Cron Job and add alerting for repeated feed failures.

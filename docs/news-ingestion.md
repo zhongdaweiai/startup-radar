@@ -53,13 +53,14 @@ Startup Radar stores and displays feed-provided metadata only: title, URL, autho
 
 ## Refresh Strategy
 
-The current Render Blueprint intentionally does not provision a paid cron service yet. The web service uses these refresh paths:
+The Render Blueprint provisions a paid cron service and keeps web-service fallbacks:
 
+- cron ingestion: `startup-radar-feed-cron` runs `npm run db:schema && npm run ingest:feeds` every 30 minutes
 - startup ingestion: `npm run db:schema && npm run ingest:feeds`
-- request-triggered refresh: API/page requests ingest again when the oldest configured feed is more than 10 minutes stale
-- in-process refresh: once the web service is awake, a lightweight timer checks the same 10-minute throttle
+- request-triggered refresh: API/page requests ingest again when the oldest configured feed is more than 30 minutes stale
+- in-process refresh: once the web service is awake, a lightweight timer checks the same 30-minute throttle
 
-A paid Render Cron Job should be added later when billing/account setup is ready. The planned service is documented in `docs/render-cron-plan.md`.
+The homepage and `/api/news` expose `refreshStatus.lastAttemptAt`, which updates after each feed run even if no new article is inserted.
 
 ## Next Step
 

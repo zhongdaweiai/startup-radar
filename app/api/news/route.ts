@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getNewsItems } from "@/lib/news";
+import { getNewsItems, getNewsRefreshStatus } from "@/lib/news";
 
 export const dynamic = "force-dynamic";
 
@@ -13,9 +13,11 @@ export async function GET(request: NextRequest) {
 
   try {
     const items = await getNewsItems({ query, limit });
+    const refreshStatus = await getNewsRefreshStatus();
 
     return NextResponse.json({
       items,
+      refreshStatus,
       generatedAt: new Date().toISOString(),
     });
   } catch (error) {
