@@ -17,25 +17,6 @@ services:
         value: https://techcrunch.com/feed/,https://techcrunch.com/category/startups/feed/
       - key: VENTUREBEAT_FEEDS
         value: https://venturebeat.com/feed/,https://venturebeat.com/category/ai/feed/,https://venturebeat.com/category/business/feed/
-  - type: cron
-    name: startup-radar-feed-cron
-    runtime: node
-    plan: starter
-    schedule: "*/10 * * * *"
-    buildCommand: npm ci
-    startCommand: npm run db:schema && npm run ingest:feeds
-    autoDeployTrigger: commit
-    envVars:
-      - key: NODE_VERSION
-        value: 22.16.0
-      - key: DATABASE_URL
-        fromDatabase:
-          name: startup-radar-db
-          property: connectionString
-      - key: TECHCRUNCH_FEEDS
-        value: https://techcrunch.com/feed/,https://techcrunch.com/category/startups/feed/
-      - key: VENTUREBEAT_FEEDS
-        value: https://venturebeat.com/feed/,https://venturebeat.com/category/ai/feed/,https://venturebeat.com/category/business/feed/
 
 databases:
   - name: startup-radar-db
