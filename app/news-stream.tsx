@@ -4,6 +4,15 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 
 export type NewsItem = {
   id: string;
+  title: string;
+  primaryCategory: string | null;
+  publishedAt: string | null;
+  firstSeenAt: string;
+  sources: NewsSourceLink[];
+};
+
+export type NewsSourceLink = {
+  id: string;
   sourceName: string;
   feedName: string;
   title: string;
@@ -35,7 +44,25 @@ function formatTimestamp(value: string | null) {
 }
 
 function itemKey(item: NewsItem) {
-  return `${item.sourceName}:${item.id}:${item.url}`;
+  return `story:${item.id}`;
+}
+
+function sourceNames(item: NewsItem) {
+  return Array.from(new Set(item.sources.map((source) => source.sourceName)));
+}
+
+function sourceLabel(item: NewsItem) {
+  const names = sourceNames(item);
+
+  if (names.length === 0) {
+    return "No source";
+  }
+
+  if (names.length <= 2) {
+    return names.join(" + ");
+  }
+
+  return `${names.length} sources`;
 }
 
 export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
@@ -157,9 +184,9 @@ export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
         <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-xs text-[#70757a]">
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-[#1a73e8]" />
-            Live TechCrunch feed
+            Live TechCrunch + VentureBeat feed
           </span>
-          <span>{items.length} links loaded</span>
+          <span>{items.length} stories loaded</span>
           <span>Updated {dateFormatter.format(lastUpdated)}</span>
           {isLoading ? <span>Searching...</span> : null}
         </div>
@@ -175,28 +202,43 @@ export function NewsStream({ initialItems, initialQuery }: NewsStreamProps) {
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#70757a]">
                       <span>{formatTimestamp(item.publishedAt)}</span>
                       <span>·</span>
-                      <span>{item.sourceName}</span>
+                      <span>{sourceLabel(item)}</span>
                       {item.primaryCategory ? (
                         <>
                           <span>·</span>
                           <span>{item.primaryCategory}</span>
                         </>
                       ) : null}
-                      {item.author ? (
+                      {item.sources.length > 1 ? (
                         <>
                           <span>·</span>
-                          <span>{item.author}</span>
+                          <span>{item.sources.length} links merged</span>
                         </>
                       ) : null}
                     </div>
                     <a
                       className="text-[17px] font-medium leading-6 text-[#1a0dab] underline-offset-2 hover:underline"
-                      href={item.url}
+                      href={item.sources[0]?.url ?? "#"}
                       rel="noreferrer"
                       target="_blank"
                     >
                       {item.title}
                     </a>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      {item.sources.map((source) => (
+                        <a
+                          className="text-[#4d5156] underline-offset-2 hover:text-[#1a0dab] hover:underline"
+                          href={source.url}
+                          key={`${source.sourceName}:${source.id}:${source.url}`}
+                          rel="noreferrer"
+                          target="_blank"
+                          title={source.title}
+                        >
+                          {source.sourceName}
+                          {source.feedName ? ` · ${source.feedName}` : ""}
+                        </a>
+                      ))}
+                    </div>
                   </article>
                 </li>
               ))}

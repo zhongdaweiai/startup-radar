@@ -21,8 +21,20 @@ CREATE TABLE IF NOT EXISTS source_feeds (
   UNIQUE (source_id, feed_url)
 );
 
+CREATE TABLE IF NOT EXISTS stories (
+  id BIGSERIAL PRIMARY KEY,
+  story_key TEXT NOT NULL UNIQUE,
+  canonical_title TEXT NOT NULL,
+  story_terms TEXT[] NOT NULL DEFAULT '{}',
+  primary_category TEXT,
+  published_at TIMESTAMPTZ,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS articles (
   id BIGSERIAL PRIMARY KEY,
+  story_id BIGINT REFERENCES stories(id) ON DELETE SET NULL,
   source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
   source_feed_id BIGINT NOT NULL REFERENCES source_feeds(id) ON DELETE CASCADE,
   guid TEXT,
@@ -35,6 +47,9 @@ CREATE TABLE IF NOT EXISTS articles (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   raw_payload JSONB
 );
+
+ALTER TABLE articles
+  ADD COLUMN IF NOT EXISTS story_id BIGINT REFERENCES stories(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS article_categories (
   article_id BIGINT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
@@ -56,6 +71,15 @@ CREATE TABLE IF NOT EXISTS fetch_runs (
 
 CREATE INDEX IF NOT EXISTS articles_published_at_idx
   ON articles (published_at DESC NULLS LAST, first_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS articles_story_id_idx
+  ON articles (story_id);
+
+CREATE INDEX IF NOT EXISTS stories_published_at_idx
+  ON stories (published_at DESC NULLS LAST, first_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS stories_terms_idx
+  ON stories USING GIN (story_terms);
 
 CREATE INDEX IF NOT EXISTS articles_primary_category_idx
   ON articles (primary_category);

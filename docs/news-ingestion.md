@@ -9,25 +9,31 @@ The homepage is intentionally simple:
 - No dashboard cards, charts, or decorative radar UI.
 - Search runs against the local API and refreshes the stream in place.
 
-## Current Source
+## Current Sources
 
-The first source is TechCrunch.
+The first sources are TechCrunch and VentureBeat.
 
-Configured feeds:
+Configured TechCrunch feeds:
 
 - `https://techcrunch.com/feed/`
 - `https://techcrunch.com/category/startups/feed/`
 
-TechCrunch's RSS terms allow feed display with attribution and links back to full articles. Startup Radar stores and displays feed-provided metadata only: title, URL, author, category, timestamps, and raw feed payload for auditability.
+Configured VentureBeat feeds:
+
+- `https://venturebeat.com/feed/`
+- `https://venturebeat.com/category/ai/feed/`
+- `https://venturebeat.com/category/business/feed/`
+
+Startup Radar stores and displays feed-provided metadata only: title, URL, author, category, timestamps, and raw feed payload for auditability.
 
 ## Code Map
 
 - `app/page.tsx`: server entry for the homepage.
 - `app/news-stream.tsx`: client search box and scrolling link stream.
 - `app/api/news/route.ts`: JSON endpoint for news search.
-- `lib/news.ts`: Postgres read path, first-run schema setup, RSS preview fallback, throttled feed refresh, and server-side ingestion helper.
+- `lib/news.ts`: Postgres read path, first-run schema setup, RSS preview fallback, story clustering, throttled feed refresh, and server-side ingestion helper.
 - `scripts/apply-schema.mjs`: applies `db/schema.sql`.
-- `scripts/ingest-techcrunch.mjs`: deployment-safe TechCrunch RSS ingestion script.
+- `scripts/ingest-feeds.mjs`: deployment-safe multi-source RSS ingestion script.
 - `db/schema.sql`: database schema and indexes.
 - `render.yaml`: Render web service and Postgres database.
 
@@ -37,11 +43,23 @@ TechCrunch's RSS terms allow feed display with attribution and links back to ful
 
 `source_feeds` stores individual feeds such as Latest and Startups, plus fetch status fields.
 
-`articles` stores deduplicated links. `url` is the unique key. The app uses `published_at` and `first_seen_at` to order the stream.
+`stories` stores clustered story records. It keeps a canonical title, a normalized title-term key, and the latest observed publication timestamp.
+
+`articles` stores deduplicated links. `url` is the unique key. Each article can point to a `story_id`, allowing multiple publishers or multiple RSS entries to show as one story with multiple source links.
 
 `article_categories` stores many-to-one category tags from RSS.
 
 `fetch_runs` records every ingestion attempt, including failure messages.
+
+## Refresh Strategy
+
+The current Render Blueprint stays on the free web service plan, so it does not provision a paid Render Cron Job. Instead, the app uses:
+
+- startup ingestion: `npm run db:schema && npm run ingest:feeds`
+- request-triggered refresh: API/page requests ingest again when the oldest configured feed is more than 10 minutes stale
+- in-process refresh: once the web service is awake, a lightweight timer checks the same 10-minute throttle
+
+This keeps the public page fresh while avoiding billing changes.
 
 ## Next Step
 

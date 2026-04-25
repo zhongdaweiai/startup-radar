@@ -3,13 +3,21 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Pool } from "pg";
 import Parser from "rss-parser";
-import type { NewsItem } from "@/app/news-stream";
+import type { NewsItem, NewsSourceLink } from "@/app/news-stream";
 import { fallbackNewsItems } from "./fallback-news";
 
 type FeedDefinition = {
   name: string;
   category: string;
   url: string;
+};
+
+type SourceDefinition = {
+  slug: string;
+  name: string;
+  homepageUrl: string;
+  envName: string;
+  feeds: FeedDefinition[];
 };
 
 type RssCustomFields = {
@@ -31,26 +39,129 @@ type IngestResult = {
   insertedOrUpdated: number;
 };
 
-type NewsRow = NewsItem;
+type ArticlePreview = NewsSourceLink & {
+  categories: string[];
+};
+
+type StoryArticleRow = {
+  storyId: string | null;
+  articleId: string;
+  storyTitle: string | null;
+  storyCategory: string | null;
+  sourceName: string;
+  feedName: string;
+  title: string;
+  url: string;
+  author: string | null;
+  primaryCategory: string | null;
+  publishedAt: Date | string | null;
+  firstSeenAt: Date | string;
+};
+
+type StoryCandidateRow = {
+  id: number;
+  canonicalTitle: string;
+  storyTerms: string[] | null;
+};
 
 const FEED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const STORY_LOOKBACK_DAYS = 7;
 
-const DEFAULT_FEEDS: FeedDefinition[] = [
+const DEFAULT_SOURCES: SourceDefinition[] = [
   {
-    name: "Latest",
-    category: "Latest",
-    url: "https://techcrunch.com/feed/",
+    slug: "techcrunch",
+    name: "TechCrunch",
+    homepageUrl: "https://techcrunch.com/",
+    envName: "TECHCRUNCH_FEEDS",
+    feeds: [
+      {
+        name: "Latest",
+        category: "Latest",
+        url: "https://techcrunch.com/feed/",
+      },
+      {
+        name: "Startups",
+        category: "Startups",
+        url: "https://techcrunch.com/category/startups/feed/",
+      },
+    ],
   },
   {
-    name: "Startups",
-    category: "Startups",
-    url: "https://techcrunch.com/category/startups/feed/",
+    slug: "venturebeat",
+    name: "VentureBeat",
+    homepageUrl: "https://venturebeat.com/",
+    envName: "VENTUREBEAT_FEEDS",
+    feeds: [
+      {
+        name: "Latest",
+        category: "Latest",
+        url: "https://venturebeat.com/feed/",
+      },
+      {
+        name: "AI",
+        category: "AI",
+        url: "https://venturebeat.com/category/ai/feed/",
+      },
+      {
+        name: "Business",
+        category: "Business",
+        url: "https://venturebeat.com/category/business/feed/",
+      },
+    ],
   },
 ];
+
+const STOP_WORDS = new Set([
+  "a",
+  "about",
+  "after",
+  "all",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "can",
+  "for",
+  "from",
+  "has",
+  "have",
+  "how",
+  "in",
+  "into",
+  "is",
+  "it",
+  "its",
+  "new",
+  "of",
+  "on",
+  "or",
+  "over",
+  "says",
+  "startup",
+  "startups",
+  "that",
+  "the",
+  "their",
+  "this",
+  "to",
+  "up",
+  "what",
+  "why",
+  "will",
+  "with",
+  "your",
+]);
+
+const SHORT_TERMS = new Set(["ai", "ar", "vr", "vc", "ipo", "llm", "aws", "ios"]);
 
 let pool: Pool | null = null;
 let schemaReady = false;
 let feedRefresh: Promise<IngestResult> | null = null;
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 function getPool() {
   const databaseUrl = process.env.DATABASE_URL;
@@ -74,81 +185,6 @@ function getPool() {
   return pool;
 }
 
-function getFeedDefinitions() {
-  const configuredFeeds = process.env.TECHCRUNCH_FEEDS;
-
-  if (!configuredFeeds) {
-    return DEFAULT_FEEDS;
-  }
-
-  return configuredFeeds
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map((url) => {
-      const isStartups = url.includes("/category/startups");
-
-      return {
-        name: isStartups ? "Startups" : "Latest",
-        category: isStartups ? "Startups" : "Latest",
-        url,
-      };
-    });
-}
-
-async function ensureSchema() {
-  const activePool = getPool();
-
-  if (!activePool || schemaReady) {
-    return;
-  }
-
-  const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-  const schema = await fs.readFile(schemaPath, "utf8");
-  await activePool.query(schema);
-  schemaReady = true;
-}
-
-async function isFeedRefreshDue() {
-  const activePool = getPool();
-
-  if (!activePool) {
-    return false;
-  }
-
-  const result = await activePool.query<{
-    lastFetchedAt: Date | string | null;
-    feedCount: string;
-  }>(
-    `
-      SELECT
-        max(source_feeds.last_fetched_at) AS "lastFetchedAt",
-        count(source_feeds.id)::text AS "feedCount"
-      FROM sources
-      LEFT JOIN source_feeds ON source_feeds.source_id = sources.id
-      WHERE sources.slug = 'techcrunch'
-    `,
-  );
-
-  const row = result.rows[0];
-  if (!row || row.feedCount === "0" || !row.lastFetchedAt) {
-    return true;
-  }
-
-  const lastFetchedAt = new Date(row.lastFetchedAt).getTime();
-  return Date.now() - lastFetchedAt > FEED_REFRESH_INTERVAL_MS;
-}
-
-async function refreshFeedsOnce() {
-  if (!feedRefresh) {
-    feedRefresh = ingestTechCrunchFeeds().finally(() => {
-      feedRefresh = null;
-    });
-  }
-
-  return feedRefresh;
-}
-
 function normalizeText(value: string | undefined | null) {
   if (!value) {
     return null;
@@ -164,6 +200,52 @@ function normalizeDate(value: string | undefined | null) {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function stableId(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
+
+function inferFeed(url: string, fallbackFeeds: FeedDefinition[]): FeedDefinition {
+  const fallback = fallbackFeeds.find((feed) => feed.url === url);
+  if (fallback) {
+    return fallback;
+  }
+
+  if (url.includes("/category/startups")) {
+    return { name: "Startups", category: "Startups", url };
+  }
+
+  if (url.includes("/category/business")) {
+    return { name: "Business", category: "Business", url };
+  }
+
+  if (url.includes("/category/ai")) {
+    return { name: "AI", category: "AI", url };
+  }
+
+  return { name: "Latest", category: "Latest", url };
+}
+
+function getSourceDefinitions() {
+  return DEFAULT_SOURCES.map((source) => {
+    const configuredFeeds = process.env[source.envName];
+
+    if (!configuredFeeds) {
+      return source;
+    }
+
+    const feeds = configuredFeeds
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((url) => inferFeed(url, source.feeds));
+
+    return {
+      ...source,
+      feeds: feeds.length > 0 ? feeds : source.feeds,
+    };
+  });
 }
 
 function normalizeCategories(item: RssItem, feed: FeedDefinition) {
@@ -187,11 +269,155 @@ function itemAuthor(item: RssItem) {
   );
 }
 
-function stableArticleId(url: string) {
-  return createHash("sha256").update(url).digest("hex").slice(0, 24);
+function stemTerm(value: string) {
+  if (value.length > 5 && value.endsWith("ing")) {
+    return value.slice(0, -3);
+  }
+
+  if (value.length > 4 && value.endsWith("es")) {
+    return value.slice(0, -2);
+  }
+
+  if (value.length > 4 && value.endsWith("s")) {
+    return value.slice(0, -1);
+  }
+
+  return value;
 }
 
-async function fetchFeedPreview(feed: FeedDefinition) {
+function titleTerms(title: string) {
+  const normalized = title
+    .toLowerCase()
+    .replace(/['’]s\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ");
+
+  const terms = normalized
+    .split(" ")
+    .map((term) => stemTerm(term.trim()))
+    .filter((term) => {
+      if (!term || STOP_WORDS.has(term)) {
+        return false;
+      }
+
+      return term.length > 2 || SHORT_TERMS.has(term);
+    });
+
+  return Array.from(new Set(terms));
+}
+
+function storyKeyForTitle(title: string) {
+  const terms = titleTerms(title);
+
+  if (terms.length === 0) {
+    return stableId(title);
+  }
+
+  return terms.sort().slice(0, 14).join(":");
+}
+
+function termsAreSimilar(left: string[], right: string[]) {
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  const shared = Array.from(leftSet).filter((term) => rightSet.has(term)).length;
+  const smaller = Math.min(leftSet.size, rightSet.size);
+  const larger = Math.max(leftSet.size, rightSet.size);
+  const containment = shared / smaller;
+  const balance = shared / larger;
+
+  return shared >= 2 && containment >= 0.4 && balance >= 0.18;
+}
+
+async function ensureSchema() {
+  const activePool = getPool();
+
+  if (!activePool || schemaReady) {
+    return;
+  }
+
+  const schemaPath = path.join(process.cwd(), "db", "schema.sql");
+  const schema = await fs.readFile(schemaPath, "utf8");
+  await activePool.query(schema);
+  schemaReady = true;
+}
+
+async function isFeedRefreshDue() {
+  const activePool = getPool();
+
+  if (!activePool) {
+    return false;
+  }
+
+  const feedUrls = getSourceDefinitions().flatMap((source) =>
+    source.feeds.map((feed) => feed.url),
+  );
+
+  const result = await activePool.query<{
+    oldestFetchedAt: Date | string | null;
+    feedCount: string;
+    missingFetchCount: string;
+  }>(
+    `
+      SELECT
+        min(source_feeds.last_fetched_at) AS "oldestFetchedAt",
+        count(source_feeds.id)::text AS "feedCount",
+        count(source_feeds.id) FILTER (WHERE source_feeds.last_fetched_at IS NULL)::text AS "missingFetchCount"
+      FROM source_feeds
+      WHERE source_feeds.feed_url = ANY($1)
+        AND source_feeds.active = true
+    `,
+    [feedUrls],
+  );
+
+  const row = result.rows[0];
+  if (!row || Number(row.feedCount) < feedUrls.length) {
+    return true;
+  }
+
+  if (Number(row.missingFetchCount) > 0 || !row.oldestFetchedAt) {
+    return true;
+  }
+
+  const oldestFetchedAt = new Date(row.oldestFetchedAt).getTime();
+  return Date.now() - oldestFetchedAt > FEED_REFRESH_INTERVAL_MS;
+}
+
+async function refreshFeedsIfDue() {
+  if (await isFeedRefreshDue()) {
+    await refreshFeedsOnce();
+  }
+}
+
+async function refreshFeedsOnce() {
+  if (!feedRefresh) {
+    feedRefresh = ingestNewsFeeds().finally(() => {
+      feedRefresh = null;
+    });
+  }
+
+  return feedRefresh;
+}
+
+function startBackgroundRefresh() {
+  if (refreshTimer || !getPool()) {
+    return;
+  }
+
+  refreshTimer = setInterval(() => {
+    void refreshFeedsIfDue().catch((error) => {
+      console.error(error);
+    });
+  }, FEED_REFRESH_INTERVAL_MS);
+
+  if (typeof refreshTimer === "object" && "unref" in refreshTimer) {
+    refreshTimer.unref();
+  }
+}
+
+async function fetchFeedPreview(source: SourceDefinition, feed: FeedDefinition) {
   const parser = new Parser();
   const parsed = await parser.parseURL(feed.url);
 
@@ -207,9 +433,9 @@ async function fetchFeedPreview(feed: FeedDefinition) {
 
       const categories = normalizeCategories(typedItem, feed);
 
-      const previewItem: NewsItem = {
-        id: stableArticleId(url),
-        sourceName: "TechCrunch",
+      const previewItem: ArticlePreview = {
+        id: stableId(url),
+        sourceName: source.name,
         feedName: feed.name,
         title,
         url,
@@ -217,39 +443,109 @@ async function fetchFeedPreview(feed: FeedDefinition) {
         primaryCategory: categories[0] ?? feed.category,
         publishedAt: normalizeDate(typedItem.isoDate ?? typedItem.pubDate),
         firstSeenAt: new Date().toISOString(),
+        categories,
       };
 
       return previewItem;
     })
-    .filter((item): item is NewsItem => Boolean(item));
+    .filter((item): item is ArticlePreview => Boolean(item));
+}
+
+function storyMatchesQuery(item: NewsItem, query: string) {
+  const haystack = [
+    item.title,
+    item.primaryCategory,
+    ...item.sources.flatMap((source) => [
+      source.sourceName,
+      source.feedName,
+      source.title,
+      source.author,
+      source.primaryCategory,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes(query.toLowerCase());
+}
+
+function previewSource(article: ArticlePreview): NewsSourceLink {
+  return {
+    id: article.id,
+    sourceName: article.sourceName,
+    feedName: article.feedName,
+    title: article.title,
+    url: article.url,
+    author: article.author,
+    primaryCategory: article.primaryCategory,
+    publishedAt: article.publishedAt,
+    firstSeenAt: article.firstSeenAt,
+  };
+}
+
+function clusterPreviewArticles(articles: ArticlePreview[]) {
+  const sortedArticles = [...articles].sort((a, b) => {
+    const left = new Date(a.publishedAt ?? a.firstSeenAt).getTime();
+    const right = new Date(b.publishedAt ?? b.firstSeenAt).getTime();
+    return right - left;
+  });
+
+  const stories: Array<NewsItem & { terms: string[] }> = [];
+
+  for (const article of sortedArticles) {
+    const terms = titleTerms(article.title);
+    const existingStory = stories.find((story) =>
+      termsAreSimilar(story.terms, terms),
+    );
+
+    if (existingStory) {
+      if (!existingStory.sources.some((source) => source.url === article.url)) {
+        existingStory.sources.push(previewSource(article));
+      }
+      continue;
+    }
+
+    stories.push({
+      id: stableId(storyKeyForTitle(article.title)),
+      title: article.title,
+      primaryCategory: article.primaryCategory,
+      publishedAt: article.publishedAt,
+      firstSeenAt: article.firstSeenAt,
+      sources: [previewSource(article)],
+      terms,
+    });
+  }
+
+  return stories.map((story) => ({
+    id: story.id,
+    title: story.title,
+    primaryCategory: story.primaryCategory,
+    publishedAt: story.publishedAt,
+    firstSeenAt: story.firstSeenAt,
+    sources: story.sources,
+  }));
 }
 
 async function getLivePreview({ query, limit = 40 }: NewsQuery) {
   try {
-    const feeds = getFeedDefinitions();
-    const results = await Promise.allSettled(feeds.map(fetchFeedPreview));
-    const merged = results
+    const sources = getSourceDefinitions();
+    const feedRequests = sources.flatMap((source) =>
+      source.feeds.map((feed) => fetchFeedPreview(source, feed)),
+    );
+    const results = await Promise.allSettled(feedRequests);
+    const articles = results
       .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
       .filter((item, index, all) => {
         const firstIndex = all.findIndex((candidate) => candidate.url === item.url);
         return firstIndex === index;
-      })
-      .sort((a, b) => {
-        const left = new Date(a.publishedAt ?? a.firstSeenAt).getTime();
-        const right = new Date(b.publishedAt ?? b.firstSeenAt).getTime();
-        return right - left;
       });
 
-    const normalizedQuery = normalizeText(query)?.toLowerCase();
+    const normalizedQuery = normalizeText(query);
+    const stories = clusterPreviewArticles(articles);
     const filtered = normalizedQuery
-      ? merged.filter((item) =>
-          [item.title, item.author, item.primaryCategory]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase()
-            .includes(normalizedQuery),
-        )
-      : merged;
+      ? stories.filter((item) => storyMatchesQuery(item, normalizedQuery))
+      : stories;
 
     return filtered.slice(0, limit);
   } catch (error) {
@@ -258,7 +554,7 @@ async function getLivePreview({ query, limit = 40 }: NewsQuery) {
   }
 }
 
-async function getSourceId() {
+async function getSourceId(source: SourceDefinition) {
   const activePool = getPool();
 
   if (!activePool) {
@@ -276,7 +572,7 @@ async function getSourceId() {
         updated_at = now()
       RETURNING id
     `,
-    ["techcrunch", "TechCrunch", "https://techcrunch.com/"],
+    [source.slug, source.name, source.homepageUrl],
   );
 
   return result.rows[0]?.id ?? null;
@@ -307,44 +603,131 @@ async function upsertFeed(sourceId: number, feed: FeedDefinition) {
   return result.rows[0]?.id ?? null;
 }
 
-export async function ingestTechCrunchFeeds() {
-  const activePool = getPool();
+async function findSimilarStory(
+  activePool: Pool,
+  title: string,
+  publishedAt: string | null,
+) {
+  const terms = titleTerms(title);
+  const cutoffDate = new Date(
+    (publishedAt ? new Date(publishedAt).getTime() : Date.now()) -
+      STORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
 
-  if (!activePool) {
-    return { fetched: 0, insertedOrUpdated: 0 } satisfies IngestResult;
-  }
+  const candidates = await activePool.query<StoryCandidateRow>(
+    `
+      SELECT
+        id,
+        canonical_title AS "canonicalTitle",
+        story_terms AS "storyTerms"
+      FROM stories
+      WHERE COALESCE(published_at, first_seen_at) >= $1
+      ORDER BY COALESCE(published_at, first_seen_at) DESC
+      LIMIT 300
+    `,
+    [cutoffDate],
+  );
 
-  await ensureSchema();
+  return candidates.rows.find((candidate) =>
+    termsAreSimilar(candidate.storyTerms ?? titleTerms(candidate.canonicalTitle), terms),
+  );
+}
 
-  const sourceId = await getSourceId();
-  if (!sourceId) {
-    return { fetched: 0, insertedOrUpdated: 0 } satisfies IngestResult;
-  }
+async function upsertStory(
+  activePool: Pool,
+  title: string,
+  primaryCategory: string | null,
+  publishedAt: string | null,
+) {
+  const storyKey = storyKeyForTitle(title);
+  const exact = await activePool.query<{ id: number }>(
+    `
+      SELECT id
+      FROM stories
+      WHERE story_key = $1
+      LIMIT 1
+    `,
+    [storyKey],
+  );
 
-  const parser = new Parser();
-  let fetched = 0;
-  let insertedOrUpdated = 0;
+  const existingStory = exact.rows[0] ?? (await findSimilarStory(activePool, title, publishedAt));
 
-  for (const feed of getFeedDefinitions()) {
-    const feedId = await upsertFeed(sourceId, feed);
-    if (!feedId) {
-      continue;
-    }
-
-    const run = await activePool.query<{ id: number }>(
+  if (existingStory) {
+    await activePool.query(
       `
-        INSERT INTO fetch_runs (source_feed_id, status, started_at)
-        VALUES ($1, 'running', now())
-        RETURNING id
+        UPDATE stories
+        SET
+          primary_category = COALESCE(stories.primary_category, $2),
+          published_at = CASE
+            WHEN $3::timestamptz IS NULL THEN stories.published_at
+            ELSE GREATEST(COALESCE(stories.published_at, $3::timestamptz), $3::timestamptz)
+          END,
+          updated_at = now()
+        WHERE id = $1
       `,
-      [feedId],
+      [existingStory.id, primaryCategory, publishedAt],
     );
-    const runId = run.rows[0]?.id;
+
+    return existingStory.id;
+  }
+
+  const result = await activePool.query<{ id: number }>(
+    `
+      INSERT INTO stories (
+        story_key,
+        canonical_title,
+        story_terms,
+        primary_category,
+        published_at
+      )
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (story_key)
+      DO UPDATE SET
+        primary_category = COALESCE(stories.primary_category, EXCLUDED.primary_category),
+        published_at = COALESCE(GREATEST(stories.published_at, EXCLUDED.published_at), stories.published_at, EXCLUDED.published_at),
+        updated_at = now()
+      RETURNING id
+    `,
+    [storyKey, title, titleTerms(title), primaryCategory, publishedAt],
+  );
+
+  return result.rows[0]?.id ?? null;
+}
+
+async function recordFeedRun(
+  activePool: Pool,
+  feedId: number,
+  callback: (runId: number | null) => Promise<IngestResult>,
+) {
+  const run = await activePool.query<{ id: number }>(
+    `
+      INSERT INTO fetch_runs (source_feed_id, status, started_at)
+      VALUES ($1, 'running', now())
+      RETURNING id
+    `,
+    [feedId],
+  );
+
+  return callback(run.rows[0]?.id ?? null);
+}
+
+async function ingestFeed(
+  activePool: Pool,
+  sourceId: number,
+  source: SourceDefinition,
+  feed: FeedDefinition,
+) {
+  const feedId = await upsertFeed(sourceId, feed);
+  if (!feedId) {
+    return { fetched: 0, insertedOrUpdated: 0 };
+  }
+
+  return recordFeedRun(activePool, feedId, async (runId) => {
+    const parser = new Parser();
     let feedInsertedOrUpdated = 0;
 
     try {
       const parsed = await parser.parseURL(feed.url);
-      fetched += parsed.items.length;
 
       for (const item of parsed.items as RssItem[]) {
         const title = normalizeText(item.title);
@@ -355,10 +738,19 @@ export async function ingestTechCrunchFeeds() {
         }
 
         const categories = normalizeCategories(item, feed);
+        const primaryCategory = categories[0] ?? feed.category;
         const publishedAt = normalizeDate(item.isoDate ?? item.pubDate);
+        const storyId = await upsertStory(
+          activePool,
+          title,
+          primaryCategory,
+          publishedAt,
+        );
+
         const result = await activePool.query<{ id: number }>(
           `
             INSERT INTO articles (
+              story_id,
               source_id,
               source_feed_id,
               guid,
@@ -369,9 +761,11 @@ export async function ingestTechCrunchFeeds() {
               published_at,
               raw_payload
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (url)
             DO UPDATE SET
+              story_id = COALESCE(EXCLUDED.story_id, articles.story_id),
+              source_id = EXCLUDED.source_id,
               source_feed_id = EXCLUDED.source_feed_id,
               guid = COALESCE(EXCLUDED.guid, articles.guid),
               title = EXCLUDED.title,
@@ -383,15 +777,16 @@ export async function ingestTechCrunchFeeds() {
             RETURNING id
           `,
           [
+            storyId,
             sourceId,
             feedId,
             normalizeText(item.guid ?? item.id),
             title,
             url,
             itemAuthor(item),
-            categories[0] ?? feed.category,
+            primaryCategory,
             publishedAt,
-            JSON.stringify(item),
+            JSON.stringify({ ...item, source: source.slug, feed: feed.name }),
           ],
         );
 
@@ -400,7 +795,6 @@ export async function ingestTechCrunchFeeds() {
           continue;
         }
 
-        insertedOrUpdated += 1;
         feedInsertedOrUpdated += 1;
 
         for (const category of categories) {
@@ -437,6 +831,11 @@ export async function ingestTechCrunchFeeds() {
           [runId, parsed.items.length, feedInsertedOrUpdated],
         );
       }
+
+      return {
+        fetched: parsed.items.length,
+        insertedOrUpdated: feedInsertedOrUpdated,
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
 
@@ -459,20 +858,168 @@ export async function ingestTechCrunchFeeds() {
           [runId, message],
         );
       }
+
+      console.error(`${source.name} feed failed: ${feed.url} (${message})`);
+      return { fetched: 0, insertedOrUpdated: 0 };
+    }
+  });
+}
+
+export async function ingestNewsFeeds() {
+  const activePool = getPool();
+
+  if (!activePool) {
+    return { fetched: 0, insertedOrUpdated: 0 } satisfies IngestResult;
+  }
+
+  await ensureSchema();
+
+  let fetched = 0;
+  let insertedOrUpdated = 0;
+
+  for (const source of getSourceDefinitions()) {
+    const sourceId = await getSourceId(source);
+    if (!sourceId) {
+      continue;
+    }
+
+    for (const feed of source.feeds) {
+      const result = await ingestFeed(activePool, sourceId, source, feed);
+      fetched += result.fetched;
+      insertedOrUpdated += result.insertedOrUpdated;
     }
   }
 
   return { fetched, insertedOrUpdated } satisfies IngestResult;
 }
 
-function serializeNewsRows(rows: NewsRow[]) {
-  return rows.map((item) => ({
-    ...item,
-    publishedAt: item.publishedAt
-      ? new Date(item.publishedAt).toISOString()
-      : null,
-    firstSeenAt: new Date(item.firstSeenAt).toISOString(),
-  }));
+export async function ingestTechCrunchFeeds() {
+  return ingestNewsFeeds();
+}
+
+function iso(value: Date | string | null) {
+  return value ? new Date(value).toISOString() : null;
+}
+
+function rowTime(row: StoryArticleRow) {
+  return new Date(row.publishedAt ?? row.firstSeenAt).getTime();
+}
+
+function serializeStoryRows(rows: StoryArticleRow[]) {
+  const stories = new Map<string, NewsItem>();
+
+  for (const row of rows) {
+    const storyId = row.storyId ? `story-${row.storyId}` : `article-${row.articleId}`;
+    const source: NewsSourceLink = {
+      id: row.articleId,
+      sourceName: row.sourceName,
+      feedName: row.feedName,
+      title: row.title,
+      url: row.url,
+      author: row.author,
+      primaryCategory: row.primaryCategory,
+      publishedAt: iso(row.publishedAt),
+      firstSeenAt: new Date(row.firstSeenAt).toISOString(),
+    };
+
+    const existing = stories.get(storyId);
+    if (!existing) {
+      stories.set(storyId, {
+        id: storyId,
+        title: row.storyTitle ?? row.title,
+        primaryCategory: row.storyCategory ?? row.primaryCategory,
+        publishedAt: iso(row.publishedAt),
+        firstSeenAt: new Date(row.firstSeenAt).toISOString(),
+        sources: [source],
+      });
+      continue;
+    }
+
+    if (!existing.sources.some((candidate) => candidate.url === source.url)) {
+      existing.sources.push(source);
+    }
+
+    const currentTime = existing.publishedAt
+      ? new Date(existing.publishedAt).getTime()
+      : 0;
+    const nextTime = rowTime(row);
+    if (nextTime > currentTime) {
+      existing.publishedAt = iso(row.publishedAt);
+    }
+  }
+
+  return Array.from(stories.values()).sort((a, b) => {
+    const left = new Date(a.publishedAt ?? a.firstSeenAt).getTime();
+    const right = new Date(b.publishedAt ?? b.firstSeenAt).getTime();
+    return right - left;
+  });
+}
+
+async function queryStoryRows(
+  activePool: Pool,
+  normalizedQuery: string | null,
+  limit: number,
+) {
+  const rowLimit = Math.max(limit * 8, 80);
+  const params = normalizedQuery
+    ? [`%${normalizedQuery}%`, rowLimit]
+    : [rowLimit];
+
+  const sql = normalizedQuery
+    ? `
+        SELECT
+          stories.id::text AS "storyId",
+          articles.id::text AS "articleId",
+          stories.canonical_title AS "storyTitle",
+          stories.primary_category AS "storyCategory",
+          sources.name AS "sourceName",
+          source_feeds.name AS "feedName",
+          articles.title,
+          articles.url,
+          articles.author,
+          articles.primary_category AS "primaryCategory",
+          articles.published_at AS "publishedAt",
+          articles.first_seen_at AS "firstSeenAt"
+        FROM articles
+        INNER JOIN sources ON sources.id = articles.source_id
+        INNER JOIN source_feeds ON source_feeds.id = articles.source_feed_id
+        LEFT JOIN stories ON stories.id = articles.story_id
+        WHERE
+          COALESCE(stories.canonical_title, '') ILIKE $1
+          OR articles.title ILIKE $1
+          OR sources.name ILIKE $1
+          OR COALESCE(articles.author, '') ILIKE $1
+          OR COALESCE(articles.primary_category, '') ILIKE $1
+        ORDER BY
+          COALESCE(stories.published_at, articles.published_at, articles.first_seen_at) DESC,
+          COALESCE(articles.published_at, articles.first_seen_at) DESC
+        LIMIT $2
+      `
+    : `
+        SELECT
+          stories.id::text AS "storyId",
+          articles.id::text AS "articleId",
+          stories.canonical_title AS "storyTitle",
+          stories.primary_category AS "storyCategory",
+          sources.name AS "sourceName",
+          source_feeds.name AS "feedName",
+          articles.title,
+          articles.url,
+          articles.author,
+          articles.primary_category AS "primaryCategory",
+          articles.published_at AS "publishedAt",
+          articles.first_seen_at AS "firstSeenAt"
+        FROM articles
+        INNER JOIN sources ON sources.id = articles.source_id
+        INNER JOIN source_feeds ON source_feeds.id = articles.source_feed_id
+        LEFT JOIN stories ON stories.id = articles.story_id
+        ORDER BY
+          COALESCE(stories.published_at, articles.published_at, articles.first_seen_at) DESC,
+          COALESCE(articles.published_at, articles.first_seen_at) DESC
+        LIMIT $1
+      `;
+
+  return activePool.query<StoryArticleRow>(sql, params);
 }
 
 export async function getNewsItems({
@@ -487,66 +1034,25 @@ export async function getNewsItems({
   }
 
   await ensureSchema();
+  startBackgroundRefresh();
 
   if (await isFeedRefreshDue()) {
     await refreshFeedsOnce();
   }
 
-  const params = normalizedQuery
-    ? [`%${normalizedQuery}%`, limit]
-    : [limit];
+  const result = await queryStoryRows(activePool, normalizedQuery, limit);
+  const stories = serializeStoryRows(result.rows).slice(0, limit);
 
-  const sql = normalizedQuery
-    ? `
-        SELECT
-          articles.id::text AS id,
-          sources.name AS "sourceName",
-          source_feeds.name AS "feedName",
-          articles.title,
-          articles.url,
-          articles.author,
-          articles.primary_category AS "primaryCategory",
-          articles.published_at AS "publishedAt",
-          articles.first_seen_at AS "firstSeenAt"
-        FROM articles
-        INNER JOIN sources ON sources.id = articles.source_id
-        INNER JOIN source_feeds ON source_feeds.id = articles.source_feed_id
-        WHERE
-          articles.title ILIKE $1
-          OR COALESCE(articles.author, '') ILIKE $1
-          OR COALESCE(articles.primary_category, '') ILIKE $1
-        ORDER BY COALESCE(articles.published_at, articles.first_seen_at) DESC
-        LIMIT $2
-      `
-    : `
-        SELECT
-          articles.id::text AS id,
-          sources.name AS "sourceName",
-          source_feeds.name AS "feedName",
-          articles.title,
-          articles.url,
-          articles.author,
-          articles.primary_category AS "primaryCategory",
-          articles.published_at AS "publishedAt",
-          articles.first_seen_at AS "firstSeenAt"
-        FROM articles
-        INNER JOIN sources ON sources.id = articles.source_id
-        INNER JOIN source_feeds ON source_feeds.id = articles.source_feed_id
-        ORDER BY COALESCE(articles.published_at, articles.first_seen_at) DESC
-        LIMIT $1
-      `;
-
-  const result = await activePool.query<NewsRow>(sql, params);
-
-  if (result.rows.length > 0) {
-    return serializeNewsRows(result.rows);
+  if (stories.length > 0) {
+    return stories;
   }
 
-  await ingestTechCrunchFeeds();
-  const refreshedResult = await activePool.query<NewsRow>(sql, params);
+  await ingestNewsFeeds();
+  const refreshedResult = await queryStoryRows(activePool, normalizedQuery, limit);
+  const refreshedStories = serializeStoryRows(refreshedResult.rows).slice(0, limit);
 
-  if (refreshedResult.rows.length > 0) {
-    return serializeNewsRows(refreshedResult.rows);
+  if (refreshedStories.length > 0) {
+    return refreshedStories;
   }
 
   const preview = await getLivePreview({ query: normalizedQuery ?? "", limit });

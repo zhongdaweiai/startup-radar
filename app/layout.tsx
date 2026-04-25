@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Startup Radar",
-  description: "A live search and news stream for startup intelligence.",
+  description: "A live merged news stream for startup intelligence.",
 };
 
 export default function RootLayout({
