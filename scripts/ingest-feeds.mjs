@@ -502,6 +502,8 @@ async function ingestFeed(source, sourceRecordId, feed) {
   }
 }
 
+let exitCode = 0;
+
 try {
   await applySchema();
   let fetched = 0;
@@ -518,6 +520,15 @@ try {
   }
 
   console.log(`Feed ingestion complete: fetched=${fetched}, upserted=${upserted}`);
+} catch (error) {
+  exitCode = 1;
+  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
 } finally {
-  await pool.end();
+  await Promise.race([
+    pool.end(),
+    new Promise((resolve) => {
+      setTimeout(resolve, 5000);
+    }),
+  ]);
+  process.exit(exitCode);
 }
