@@ -1,11 +1,20 @@
 services:
   - type: web
     name: startup-radar
-    runtime: static
+    runtime: node
     plan: free
     buildCommand: npm ci && npm run build
-    staticPublishPath: ./out
+    startCommand: npm run db:schema && npm run ingest:techcrunch && npm run start
     autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: startup-radar-db
+          property: connectionString
+      - key: TECHCRUNCH_FEEDS
+        value: https://techcrunch.com/feed/,https://techcrunch.com/category/startups/feed/
     headers:
       - path: /*
         name: X-Frame-Options
@@ -16,3 +25,26 @@ services:
       - path: /*
         name: Referrer-Policy
         value: strict-origin-when-cross-origin
+
+  - type: cron
+    name: startup-radar-techcrunch-ingest
+    runtime: node
+    plan: free
+    schedule: "*/15 * * * *"
+    buildCommand: npm ci
+    startCommand: npm run ingest:techcrunch
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: startup-radar-db
+          property: connectionString
+      - key: TECHCRUNCH_FEEDS
+        value: https://techcrunch.com/feed/,https://techcrunch.com/category/startups/feed/
+
+databases:
+  - name: startup-radar-db
+    plan: free
+    databaseName: startup_radar
+    user: startup_radar

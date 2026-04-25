@@ -1,6 +1,14 @@
 # Startup Radar
 
-Startup Radar is a lightweight Next.js workspace for startup discovery, tracking, and research workflow development.
+Startup Radar is a live startup intelligence surface. The current version is a Google-like search page backed by a scrolling TechCrunch news stream.
+
+## What It Does Now
+
+- Shows a restrained search-first homepage.
+- Pulls TechCrunch latest and startup RSS feeds.
+- Stores news links, metadata, fetch runs, and categories in Postgres.
+- Serves news through `/api/news` for live search and refresh.
+- Runs a Render cron job every 15 minutes to ingest fresh TechCrunch links.
 
 ## Local Development
 
@@ -10,12 +18,34 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) after the development server starts.
 
+Without `DATABASE_URL`, the app falls back to live RSS preview mode. To use Postgres locally:
+
+```bash
+export DATABASE_URL="postgres://USER:PASSWORD@HOST:PORT/DATABASE"
+npm run db:schema
+npm run ingest:techcrunch
+```
+
 ## Render Deployment
 
-This repository includes `render.yaml` for a Render Static Site named `startup-radar`.
+`render.yaml` defines:
 
-- Build command: `npm ci && npm run build`
-- Publish directory: `out`
-- Default branch: `master`
+- `startup-radar`: Next.js web service
+- `startup-radar-techcrunch-ingest`: cron job that refreshes TechCrunch every 15 minutes
+- `startup-radar-db`: Postgres database
 
-Next.js is configured with `output: "export"` so Render can serve the generated static files.
+The web service runs schema setup and one ingestion pass on startup, then serves the Next.js app.
+
+## Data Model
+
+The database schema is in `db/schema.sql`.
+
+Main tables:
+
+- `sources`
+- `source_feeds`
+- `articles`
+- `article_categories`
+- `fetch_runs`
+
+See `docs/news-ingestion.md` for the implementation notes.
