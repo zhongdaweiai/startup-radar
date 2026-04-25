@@ -25,11 +25,11 @@ TechCrunch's RSS terms allow feed display with attribution and links back to ful
 - `app/page.tsx`: server entry for the homepage.
 - `app/news-stream.tsx`: client search box and scrolling link stream.
 - `app/api/news/route.ts`: JSON endpoint for news search.
-- `lib/news.ts`: Postgres read path, first-run schema setup, RSS preview fallback, and server-side ingestion helper.
+- `lib/news.ts`: Postgres read path, first-run schema setup, RSS preview fallback, throttled feed refresh, and server-side ingestion helper.
 - `scripts/apply-schema.mjs`: applies `db/schema.sql`.
-- `scripts/ingest-techcrunch.mjs`: cron-safe TechCrunch RSS ingestion script.
+- `scripts/ingest-techcrunch.mjs`: deployment-safe TechCrunch RSS ingestion script.
 - `db/schema.sql`: database schema and indexes.
-- `render.yaml`: Render web service, cron job, and Postgres database.
+- `render.yaml`: Render web service and Postgres database.
 
 ## Database Shape
 

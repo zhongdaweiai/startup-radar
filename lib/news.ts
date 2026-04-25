@@ -33,6 +33,8 @@ type IngestResult = {
 
 type NewsRow = NewsItem;
 
+const FEED_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
 const DEFAULT_FEEDS: FeedDefinition[] = [
   {
     name: "Latest",
@@ -48,6 +50,7 @@ const DEFAULT_FEEDS: FeedDefinition[] = [
 
 let pool: Pool | null = null;
 let schemaReady = false;
+let feedRefresh: Promise<IngestResult> | null = null;
 
 function getPool() {
   const databaseUrl = process.env.DATABASE_URL;
@@ -104,6 +107,46 @@ async function ensureSchema() {
   const schema = await fs.readFile(schemaPath, "utf8");
   await activePool.query(schema);
   schemaReady = true;
+}
+
+async function isFeedRefreshDue() {
+  const activePool = getPool();
+
+  if (!activePool) {
+    return false;
+  }
+
+  const result = await activePool.query<{
+    lastFetchedAt: Date | string | null;
+    feedCount: string;
+  }>(
+    `
+      SELECT
+        max(source_feeds.last_fetched_at) AS "lastFetchedAt",
+        count(source_feeds.id)::text AS "feedCount"
+      FROM sources
+      LEFT JOIN source_feeds ON source_feeds.source_id = sources.id
+      WHERE sources.slug = 'techcrunch'
+    `,
+  );
+
+  const row = result.rows[0];
+  if (!row || row.feedCount === "0" || !row.lastFetchedAt) {
+    return true;
+  }
+
+  const lastFetchedAt = new Date(row.lastFetchedAt).getTime();
+  return Date.now() - lastFetchedAt > FEED_REFRESH_INTERVAL_MS;
+}
+
+async function refreshFeedsOnce() {
+  if (!feedRefresh) {
+    feedRefresh = ingestTechCrunchFeeds().finally(() => {
+      feedRefresh = null;
+    });
+  }
+
+  return feedRefresh;
 }
 
 function normalizeText(value: string | undefined | null) {
@@ -444,6 +487,10 @@ export async function getNewsItems({
   }
 
   await ensureSchema();
+
+  if (await isFeedRefreshDue()) {
+    await refreshFeedsOnce();
+  }
 
   const params = normalizedQuery
     ? [`%${normalizedQuery}%`, limit]

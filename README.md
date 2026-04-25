@@ -8,7 +8,7 @@ Startup Radar is a live startup intelligence surface. The current version is a G
 - Pulls TechCrunch latest and startup RSS feeds.
 - Stores news links, metadata, fetch runs, and categories in Postgres.
 - Serves news through `/api/news` for live search and refresh.
-- Runs a Render cron job every 15 minutes to ingest fresh TechCrunch links.
+- Refreshes TechCrunch on the server with a 10-minute throttle, so the free web service can stay fresh without a paid cron job.
 
 ## Local Development
 
@@ -30,11 +30,10 @@ npm run ingest:techcrunch
 
 `render.yaml` defines:
 
-- `startup-radar`: Next.js web service
-- `startup-radar-techcrunch-ingest`: cron job that refreshes TechCrunch every 15 minutes
+- `startup-radar-live`: Next.js web service
 - `startup-radar-db`: Postgres database
 
-The web service runs schema setup and one ingestion pass on startup, then serves the Next.js app.
+The web service runs schema setup and one ingestion pass on startup, then serves the Next.js app. Runtime API requests refresh TechCrunch at most once every 10 minutes.
 
 ## Data Model
 
