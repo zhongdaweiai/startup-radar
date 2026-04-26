@@ -823,45 +823,92 @@ async function upsertStory(
   return result.rows[0]?.id ?? null;
 }
 
-async function upsertStorySignals(
+function mergeExtractedSignalRows(
+  rows: Array<{ title: string; categories: string[] | null }>,
+) {
+  let signals: StorySignal[] = [];
+
+  for (const row of rows) {
+    signals = mergeSignals(signals, storySignalsFor(row.title, row.categories ?? []));
+  }
+
+  return signals;
+}
+
+async function replaceStorySignals(
   activePool: Pool,
   storyId: number | null,
-  title: string,
-  categories: string[],
+  signals: StorySignal[],
 ) {
   if (!storyId) {
     return;
   }
 
-  const signals = storySignalsFor(title, categories);
+  const client = await activePool.connect();
 
-  for (const signal of signals) {
-    await activePool.query(
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM story_signals WHERE story_id = $1", [storyId]);
+
+    for (const signal of signals) {
+      await client.query(
+        `
+          INSERT INTO story_signals (
+            story_id,
+            signal_type,
+            slug,
+            label,
+            confidence,
+            evidence
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          storyId,
+          signal.type,
+          signal.slug,
+          signal.label,
+          signal.confidence,
+          signal.evidence,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function rebuildStorySignals(activePool: Pool, storyIds: Set<number>) {
+  for (const storyId of storyIds) {
+    const result = await activePool.query<{
+      title: string;
+      categories: string[] | null;
+    }>(
       `
-        INSERT INTO story_signals (
-          story_id,
-          signal_type,
-          slug,
-          label,
-          confidence,
-          evidence
-        )
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (story_id, signal_type, slug)
-        DO UPDATE SET
-          label = EXCLUDED.label,
-          confidence = GREATEST(story_signals.confidence, EXCLUDED.confidence),
-          evidence = COALESCE(EXCLUDED.evidence, story_signals.evidence),
-          updated_at = now()
+        SELECT
+          articles.title,
+          COALESCE(
+            array_remove(array_agg(DISTINCT article_categories.category), NULL),
+            ARRAY[]::text[]
+          ) AS categories
+        FROM articles
+        LEFT JOIN article_categories
+          ON article_categories.article_id = articles.id
+        WHERE articles.story_id = $1
+        GROUP BY articles.id
       `,
-      [
-        storyId,
-        signal.type,
-        signal.slug,
-        signal.label,
-        signal.confidence,
-        signal.evidence,
-      ],
+      [storyId],
+    );
+
+    await replaceStorySignals(
+      activePool,
+      storyId,
+      mergeExtractedSignalRows(result.rows),
     );
   }
 }
@@ -888,6 +935,7 @@ async function ingestFeed(
   sourceId: number,
   source: SourceDefinition,
   feed: FeedDefinition,
+  touchedStoryIds: Set<number>,
 ) {
   const feedId = await upsertFeed(sourceId, feed);
   if (!feedId) {
@@ -917,7 +965,6 @@ async function ingestFeed(
           primaryCategory,
           publishedAt,
         );
-        await upsertStorySignals(activePool, storyId, title, categories);
 
         const result = await activePool.query<{ id: number }>(
           `
@@ -965,6 +1012,10 @@ async function ingestFeed(
         const articleId = result.rows[0]?.id;
         if (!articleId) {
           continue;
+        }
+
+        if (storyId) {
+          touchedStoryIds.add(storyId);
         }
 
         feedInsertedOrUpdated += 1;
@@ -1048,6 +1099,7 @@ export async function ingestNewsFeeds() {
 
   let fetched = 0;
   let insertedOrUpdated = 0;
+  const touchedStoryIds = new Set<number>();
 
   for (const source of getSourceDefinitions()) {
     const sourceId = await getSourceId(source);
@@ -1056,11 +1108,19 @@ export async function ingestNewsFeeds() {
     }
 
     for (const feed of source.feeds) {
-      const result = await ingestFeed(activePool, sourceId, source, feed);
+      const result = await ingestFeed(
+        activePool,
+        sourceId,
+        source,
+        feed,
+        touchedStoryIds,
+      );
       fetched += result.fetched;
       insertedOrUpdated += result.insertedOrUpdated;
     }
   }
+
+  await rebuildStorySignals(activePool, touchedStoryIds);
 
   return { fetched, insertedOrUpdated } satisfies IngestResult;
 }

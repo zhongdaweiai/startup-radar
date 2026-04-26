@@ -57,7 +57,7 @@ Startup Radar stores feed-provided metadata and a first-pass event analysis laye
 
 ## Event Signal Extraction
 
-The current extractor is deliberately lightweight and deterministic. It uses headline and category text to identify:
+The current extractor is deliberately lightweight and deterministic. It uses headline text plus the feed's primary category to identify:
 
 - companies: capitalized company-like phrases and known large technology company names
 - industries: AI agents, AI infrastructure, database, developer tools, fintech, cybersecurity, health tech, robotics, mobility, climate tech, enterprise SaaS, chips, and venture capital
@@ -68,7 +68,7 @@ The extractor runs in both ingestion paths:
 - the Render Cron/script path writes signals into `story_signals`
 - the no-database RSS preview path derives signals in memory for the homepage
 
-Merged stories accumulate signals from each source link. The frontend exposes the merged article count as `heat`; duplicate articles increment that number even when the displayed story remains one row.
+Merged stories accumulate signals from each source link. After ingestion, `story_signals` is rebuilt from all current articles in the story so stale or lower-quality tags are removed instead of only being appended. The frontend exposes the merged article count as `heat`; duplicate articles increment that number even when the displayed story remains one row.
 
 ## Refresh Strategy
 

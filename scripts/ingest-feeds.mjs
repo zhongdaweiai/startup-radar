@@ -112,6 +112,7 @@ const pool = new Pool({
         rejectUnauthorized: false,
       },
 });
+const touchedStoryIds = new Set();
 
 const parser = new Parser();
 
@@ -388,41 +389,99 @@ async function storyId(title, primaryCategory, publishedAt) {
   return result.rows[0].id;
 }
 
-async function upsertStorySignals(currentStoryId, title, categories) {
+function mergeExtractedSignals(rows) {
+  const byKey = new Map();
+
+  for (const row of rows) {
+    const signals = extractStorySignals({
+      title: row.title,
+      categories: Array.isArray(row.categories) ? row.categories : [],
+    });
+
+    for (const signal of signals) {
+      const key = `${signal.type}:${signal.slug}`;
+      const existing = byKey.get(key);
+      if (!existing || signal.confidence > existing.confidence) {
+        byKey.set(key, signal);
+      }
+    }
+  }
+
+  return Array.from(byKey.values()).sort((left, right) => {
+    const typeRank = { event: 0, company: 1, industry: 2 };
+    const byType = typeRank[left.type] - typeRank[right.type];
+    if (byType !== 0) {
+      return byType;
+    }
+
+    return right.confidence - left.confidence || left.label.localeCompare(right.label);
+  });
+}
+
+async function replaceStorySignals(currentStoryId, signals) {
   if (!currentStoryId) {
     return;
   }
 
-  const signals = extractStorySignals({ title, categories });
+  const client = await pool.connect();
 
-  for (const signal of signals) {
-    await pool.query(
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM story_signals WHERE story_id = $1", [currentStoryId]);
+
+    for (const signal of signals) {
+      await client.query(
+        `
+          INSERT INTO story_signals (
+            story_id,
+            signal_type,
+            slug,
+            label,
+            confidence,
+            evidence
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          currentStoryId,
+          signal.type,
+          signal.slug,
+          signal.label,
+          signal.confidence,
+          signal.evidence,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function rebuildStorySignals(storyIds) {
+  for (const currentStoryId of storyIds) {
+    const result = await pool.query(
       `
-        INSERT INTO story_signals (
-          story_id,
-          signal_type,
-          slug,
-          label,
-          confidence,
-          evidence
-        )
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (story_id, signal_type, slug)
-        DO UPDATE SET
-          label = EXCLUDED.label,
-          confidence = GREATEST(story_signals.confidence, EXCLUDED.confidence),
-          evidence = COALESCE(EXCLUDED.evidence, story_signals.evidence),
-          updated_at = now()
+        SELECT
+          articles.title,
+          COALESCE(
+            array_remove(array_agg(DISTINCT article_categories.category), NULL),
+            ARRAY[]::text[]
+          ) AS categories
+        FROM articles
+        LEFT JOIN article_categories
+          ON article_categories.article_id = articles.id
+        WHERE articles.story_id = $1
+        GROUP BY articles.id
       `,
-      [
-        currentStoryId,
-        signal.type,
-        signal.slug,
-        signal.label,
-        signal.confidence,
-        signal.evidence,
-      ],
+      [currentStoryId],
     );
+
+    await replaceStorySignals(currentStoryId, mergeExtractedSignals(result.rows));
   }
 }
 
@@ -454,7 +513,6 @@ async function ingestFeed(source, sourceRecordId, feed) {
       const primaryCategory = categories[0] ?? feed.category;
       const publishedAt = dateOrNull(item.isoDate ?? item.pubDate);
       const currentStoryId = await storyId(title, primaryCategory, publishedAt);
-      await upsertStorySignals(currentStoryId, title, categories);
       const result = await pool.query(
         `
           INSERT INTO articles (
@@ -501,6 +559,10 @@ async function ingestFeed(source, sourceRecordId, feed) {
       const articleId = result.rows[0]?.id;
       if (!articleId) {
         continue;
+      }
+
+      if (currentStoryId) {
+        touchedStoryIds.add(currentStoryId);
       }
 
       upserted += 1;
@@ -582,6 +644,7 @@ try {
     }
   }
 
+  await rebuildStorySignals(touchedStoryIds);
   console.log(`Feed ingestion complete: fetched=${fetched}, upserted=${upserted}`);
 } catch (error) {
   exitCode = 1;
