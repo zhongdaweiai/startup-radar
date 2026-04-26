@@ -27,6 +27,10 @@ type RssCustomFields = {
   "dc:creator"?: string;
   author?: string;
   id?: string;
+  content?: string;
+  contentSnippet?: string;
+  description?: string;
+  summary?: string;
 };
 
 type RssItem = Parser.Item & RssCustomFields;
@@ -53,6 +57,7 @@ export type NewsRefreshStatus = {
 
 type ArticlePreview = NewsSourceLink & {
   categories: string[];
+  summary: string | null;
 };
 
 type StoryArticleRow = {
@@ -85,6 +90,9 @@ const STORY_LOOKBACK_DAYS = 7;
 const extractSignals = extractStorySignalsUntyped as (input: {
   title: string | null | undefined;
   categories?: string[];
+  summary?: string | null;
+  content?: string | null;
+  description?: string | null;
 }) => ExtractedStorySignal[];
 
 const DEFAULT_SOURCES: SourceDefinition[] = [
@@ -213,6 +221,17 @@ function normalizeText(value: string | undefined | null) {
   return value.replace(/\s+/g, " ").trim() || null;
 }
 
+function normalizeArticleText(value: string | undefined | null) {
+  return normalizeText(
+    value
+      ?.replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&#8217;|&rsquo;/gi, "'")
+      .replace(/&quot;/gi, '"'),
+  );
+}
+
 function normalizeDate(value: string | undefined | null) {
   if (!value) {
     return null;
@@ -310,6 +329,15 @@ function itemAuthor(item: RssItem) {
     normalizeText(item.creator) ??
     normalizeText(item["dc:creator"]) ??
     normalizeText(item.author)
+  );
+}
+
+function itemSummary(item: RssItem) {
+  return (
+    normalizeArticleText(item.contentSnippet) ??
+    normalizeArticleText(item.content) ??
+    normalizeArticleText(item.summary) ??
+    normalizeArticleText(item.description)
   );
 }
 
@@ -487,6 +515,7 @@ async function fetchFeedPreview(source: SourceDefinition, feed: FeedDefinition) 
         publishedAt: normalizeDate(typedItem.isoDate ?? typedItem.pubDate),
         firstSeenAt: new Date().toISOString(),
         categories,
+        summary: itemSummary(typedItem),
       };
 
       return previewItem;
@@ -528,8 +557,12 @@ function previewSource(article: ArticlePreview): NewsSourceLink {
   };
 }
 
-function storySignalsFor(title: string, categories: string[]) {
-  return extractSignals({ title, categories });
+function storySignalsFor(
+  title: string,
+  categories: string[],
+  summary?: string | null,
+) {
+  return extractSignals({ title, categories, summary });
 }
 
 function mergeSignals(left: StorySignal[], right: ExtractedStorySignal[]) {
@@ -626,7 +659,7 @@ function clusterPreviewArticles(articles: ArticlePreview[]) {
       existingStory.heat += 1;
       existingStory.signals = mergeSignals(
         existingStory.signals,
-        storySignalsFor(article.title, article.categories),
+        storySignalsFor(article.title, article.categories, article.summary),
       );
       continue;
     }
@@ -638,7 +671,7 @@ function clusterPreviewArticles(articles: ArticlePreview[]) {
       publishedAt: article.publishedAt,
       firstSeenAt: article.firstSeenAt,
       heat: 1,
-      signals: storySignalsFor(article.title, article.categories),
+      signals: storySignalsFor(article.title, article.categories, article.summary),
       sources: [previewSource(article)],
       terms,
     });
@@ -824,12 +857,15 @@ async function upsertStory(
 }
 
 function mergeExtractedSignalRows(
-  rows: Array<{ title: string; categories: string[] | null }>,
+  rows: Array<{ title: string; categories: string[] | null; summary: string | null }>,
 ) {
   let signals: StorySignal[] = [];
 
   for (const row of rows) {
-    signals = mergeSignals(signals, storySignalsFor(row.title, row.categories ?? []));
+    signals = mergeSignals(
+      signals,
+      storySignalsFor(row.title, row.categories ?? [], row.summary),
+    );
   }
 
   return signals;
@@ -888,10 +924,18 @@ async function rebuildStorySignals(activePool: Pool, storyIds: Set<number>) {
     const result = await activePool.query<{
       title: string;
       categories: string[] | null;
+      summary: string | null;
     }>(
       `
         SELECT
           articles.title,
+          COALESCE(
+            articles.raw_payload->>'startupRadarSummary',
+            articles.raw_payload->>'contentSnippet',
+            articles.raw_payload->>'content',
+            articles.raw_payload->>'summary',
+            articles.raw_payload->>'description'
+          ) AS summary,
           COALESCE(
             array_remove(array_agg(DISTINCT article_categories.category), NULL),
             ARRAY[]::text[]
@@ -959,6 +1003,7 @@ async function ingestFeed(
         const categories = normalizeCategories(item, feed);
         const primaryCategory = categories[0] ?? feed.category;
         const publishedAt = normalizeDate(item.isoDate ?? item.pubDate);
+        const summary = itemSummary(item);
         const storyId = await upsertStory(
           activePool,
           title,
@@ -1005,7 +1050,12 @@ async function ingestFeed(
             itemAuthor(item),
             primaryCategory,
             publishedAt,
-            JSON.stringify({ ...item, source: source.slug, feed: feed.name }),
+            JSON.stringify({
+              ...item,
+              source: source.slug,
+              feed: feed.name,
+              startupRadarSummary: summary,
+            }),
           ],
         );
 

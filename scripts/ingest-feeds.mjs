@@ -120,6 +120,17 @@ function clean(value) {
   return value?.replace(/\s+/g, " ").trim() || null;
 }
 
+function cleanArticleText(value) {
+  return clean(
+    value
+      ?.replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&#8217;|&rsquo;/gi, "'")
+      .replace(/&quot;/gi, '"'),
+  );
+}
+
 async function parseFeedUrl(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FEED_FETCH_TIMEOUT_MS);
@@ -207,6 +218,15 @@ function categoriesFor(item, feed) {
 
 function authorFor(item) {
   return clean(item.creator) ?? clean(item["dc:creator"]) ?? clean(item.author);
+}
+
+function summaryFor(item) {
+  return (
+    cleanArticleText(item.contentSnippet) ??
+    cleanArticleText(item.content) ??
+    cleanArticleText(item.summary) ??
+    cleanArticleText(item.description)
+  );
 }
 
 function stemTerm(value) {
@@ -396,6 +416,7 @@ function mergeExtractedSignals(rows) {
     const signals = extractStorySignals({
       title: row.title,
       categories: Array.isArray(row.categories) ? row.categories : [],
+      summary: row.summary,
     });
 
     for (const signal of signals) {
@@ -469,6 +490,13 @@ async function rebuildStorySignals(storyIds) {
         SELECT
           articles.title,
           COALESCE(
+            articles.raw_payload->>'startupRadarSummary',
+            articles.raw_payload->>'contentSnippet',
+            articles.raw_payload->>'content',
+            articles.raw_payload->>'summary',
+            articles.raw_payload->>'description'
+          ) AS summary,
+          COALESCE(
             array_remove(array_agg(DISTINCT article_categories.category), NULL),
             ARRAY[]::text[]
           ) AS categories
@@ -512,6 +540,7 @@ async function ingestFeed(source, sourceRecordId, feed) {
       const categories = categoriesFor(item, feed);
       const primaryCategory = categories[0] ?? feed.category;
       const publishedAt = dateOrNull(item.isoDate ?? item.pubDate);
+      const summary = summaryFor(item);
       const currentStoryId = await storyId(title, primaryCategory, publishedAt);
       const result = await pool.query(
         `
@@ -552,7 +581,12 @@ async function ingestFeed(source, sourceRecordId, feed) {
           authorFor(item),
           primaryCategory,
           publishedAt,
-          JSON.stringify({ ...item, source: source.slug, feed: feed.name }),
+          JSON.stringify({
+            ...item,
+            source: source.slug,
+            feed: feed.name,
+            startupRadarSummary: summary,
+          }),
         ],
       );
 

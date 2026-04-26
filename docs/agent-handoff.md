@@ -53,13 +53,13 @@ Key tables:
 
 Story clustering is currently simple lexical matching in `lib/news.ts` and `scripts/ingest-feeds.mjs`: normalized title terms, stop-word removal, light stemming, and overlap thresholds.
 
-Signal extraction is currently deterministic and rule based in `lib/signal-extraction.mjs`, with TypeScript signal shapes in `lib/signal-types.ts`. It identifies:
+Signal extraction is currently deterministic and rule based in `lib/signal-extraction.mjs`, with TypeScript signal shapes in `lib/signal-types.ts`. It uses headlines plus feed summary/content snippets when available, because some TechCrunch headlines use human story subjects while the actual company appears in the article lead. It identifies:
 
 - companies from company-like headline phrases and known large technology company names
 - industries such as AI Agents, AI Infrastructure, Database, Developer Tools, Fintech, Cybersecurity, Health Tech, Robotics, Mobility, Climate Tech, Enterprise SaaS, Chips, and Venture Capital
 - event types such as Funding, Acquisition, IPO, Product Launch, Partnership, Layoffs, Regulation, Legal, and Security Incident
 
-The Cron/script ingestion path rebuilds `story_signals` from all current articles in each touched story, which removes stale tags when extraction rules improve. The no-database preview path derives the same signals in memory.
+The Cron/script ingestion path rebuilds `story_signals` from all current articles in each touched story, using `articles.raw_payload` summary fields such as `startupRadarSummary`, `contentSnippet`, `content`, `summary`, and `description`. This removes stale tags when extraction rules improve. The no-database preview path derives the same signals in memory.
 
 ## Frontend Shape
 
@@ -156,6 +156,7 @@ node -e "fetch('https://startup-radar-live.onrender.com/api/news?limit=20').then
 - Added deployment-safe ingestion scripts.
 - Added story-level event signal extraction and signal chips.
 - Tightened signal extraction to avoid noisy category-triggered event tags and to rebuild stored story tags during ingestion.
+- Fixed company extraction for story-subject headlines such as the TechCrunch Series funding story: trusted article-lead patterns can identify `Series` while rejecting human/group subjects such as `Two college kids`.
 - Verified the live site and API return the merged story shape.
 
 ## Next Safe Development Ideas

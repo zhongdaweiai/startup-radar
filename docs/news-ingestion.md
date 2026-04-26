@@ -24,7 +24,7 @@ Configured VentureBeat feeds:
 - `https://venturebeat.com/category/ai/feed/`
 - `https://venturebeat.com/category/business/feed/`
 
-Startup Radar stores feed-provided metadata and a first-pass event analysis layer: title, URL, author, category, timestamps, raw feed payload, and story-level company/industry/event signals.
+Startup Radar stores feed-provided metadata and a first-pass event analysis layer: title, URL, author, category, timestamps, raw feed payload, normalized feed summary, and story-level company/industry/event signals.
 
 ## Code Map
 
@@ -57,11 +57,13 @@ Startup Radar stores feed-provided metadata and a first-pass event analysis laye
 
 ## Event Signal Extraction
 
-The current extractor is deliberately lightweight and deterministic. It uses headline text plus the feed's primary category to identify:
+The current extractor is deliberately lightweight and deterministic. It uses headline text, RSS categories, and feed summary/content snippets to identify:
 
-- companies: capitalized company-like phrases and known large technology company names
-- industries: AI agents, AI infrastructure, database, developer tools, fintech, cybersecurity, health tech, robotics, mobility, climate tech, enterprise SaaS, chips, and venture capital
+- companies: article-lead app/startup/company patterns, capitalized company-like headline phrases, and known large technology company names
+- industries: AI agents, AI infrastructure, database, developer tools, fintech, cybersecurity, health tech, robotics, mobility, climate tech, enterprise SaaS, chips, venture capital, and consumer social
 - event types: funding, acquisition, IPO, product launch, partnership, layoffs, regulation, legal, and security incident
+
+Important regression: TechCrunch sometimes titles a company story around people rather than the company, for example “Two college kids raise...”. The extractor should reject those human/group headline subjects and use the article lead/summary to extract the actual company when the lead starts with a pattern like `Company, a social networking app, ...`.
 
 The extractor runs in both ingestion paths:
 
