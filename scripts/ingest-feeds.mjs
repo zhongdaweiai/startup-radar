@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
 import Parser from "rss-parser";
+import { extractStorySignals } from "../lib/signal-extraction.mjs";
 
 const { Pool } = pg;
 
@@ -387,6 +388,44 @@ async function storyId(title, primaryCategory, publishedAt) {
   return result.rows[0].id;
 }
 
+async function upsertStorySignals(currentStoryId, title, categories) {
+  if (!currentStoryId) {
+    return;
+  }
+
+  const signals = extractStorySignals({ title, categories });
+
+  for (const signal of signals) {
+    await pool.query(
+      `
+        INSERT INTO story_signals (
+          story_id,
+          signal_type,
+          slug,
+          label,
+          confidence,
+          evidence
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (story_id, signal_type, slug)
+        DO UPDATE SET
+          label = EXCLUDED.label,
+          confidence = GREATEST(story_signals.confidence, EXCLUDED.confidence),
+          evidence = COALESCE(EXCLUDED.evidence, story_signals.evidence),
+          updated_at = now()
+      `,
+      [
+        currentStoryId,
+        signal.type,
+        signal.slug,
+        signal.label,
+        signal.confidence,
+        signal.evidence,
+      ],
+    );
+  }
+}
+
 async function ingestFeed(source, sourceRecordId, feed) {
   const currentFeedId = await feedId(sourceRecordId, feed);
   const run = await pool.query(
@@ -415,6 +454,7 @@ async function ingestFeed(source, sourceRecordId, feed) {
       const primaryCategory = categories[0] ?? feed.category;
       const publishedAt = dateOrNull(item.isoDate ?? item.pubDate);
       const currentStoryId = await storyId(title, primaryCategory, publishedAt);
+      await upsertStorySignals(currentStoryId, title, categories);
       const result = await pool.query(
         `
           INSERT INTO articles (

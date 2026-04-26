@@ -7,6 +7,16 @@ export const fallbackNewsItems: NewsItem[] = [
     primaryCategory: "Startups",
     publishedAt: null,
     firstSeenAt: new Date(0).toISOString(),
+    heat: 1,
+    signals: [
+      {
+        type: "industry",
+        label: "Venture Capital",
+        slug: "venture-capital",
+        confidence: 0.5,
+        evidence: "Fallback startup feed link",
+      },
+    ],
     sources: [
       {
         id: "fallback-techcrunch-startups-link",
@@ -27,6 +37,8 @@ export const fallbackNewsItems: NewsItem[] = [
     primaryCategory: "Latest",
     publishedAt: null,
     firstSeenAt: new Date(0).toISOString(),
+    heat: 1,
+    signals: [],
     sources: [
       {
         id: "fallback-techcrunch-latest-link",

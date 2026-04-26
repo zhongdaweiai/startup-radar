@@ -7,7 +7,8 @@ Startup Radar is a live startup intelligence surface. The current version is a G
 - Shows a restrained search-first homepage.
 - Pulls TechCrunch and VentureBeat RSS feeds.
 - Clusters similar article titles into one story with multiple source links.
-- Stores news links, metadata, fetch runs, and categories in Postgres.
+- Extracts basic company, industry, and event tags for each clustered story.
+- Stores news links, event signals, metadata, fetch runs, and categories in Postgres.
 - Serves news through `/api/news` for live search and refresh.
 - Refreshes feeds every 30 minutes through Render Cron, with startup and request/background fallbacks.
 
@@ -56,6 +57,7 @@ Main tables:
 - `stories`
 - `articles`
 - `article_categories`
+- `story_signals`
 - `fetch_runs`
 
 See `docs/news-ingestion.md` for the implementation notes.

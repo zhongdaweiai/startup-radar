@@ -4,7 +4,7 @@ This file is for future AI agents loading the repository cold. It captures the c
 
 ## Product Goal
 
-Startup Radar is evolving into a live business and finance intelligence processor. The current milestone is a clean search-first news feed that ingests startup and technology news, clusters similar articles, and displays one merged story with multiple source links.
+Startup Radar is evolving into a live business and finance intelligence processor. The current milestone is a clean search-first news feed that ingests startup and technology news, clusters similar articles, extracts basic event signals, and displays one merged story with multiple source links.
 
 ## Live Deployment
 
@@ -48,9 +48,18 @@ Key tables:
 - `stories`: clustered story records with canonical title and normalized terms.
 - `articles`: unique source links, each optionally attached to a `story_id`.
 - `article_categories`: RSS categories.
+- `story_signals`: extracted company, industry, and event tags for clustered stories.
 - `fetch_runs`: ingestion audit log.
 
 Story clustering is currently simple lexical matching in `lib/news.ts` and `scripts/ingest-feeds.mjs`: normalized title terms, stop-word removal, light stemming, and overlap thresholds.
+
+Signal extraction is currently deterministic and rule based in `lib/signal-extraction.mjs`, with TypeScript signal shapes in `lib/signal-types.ts`. It identifies:
+
+- companies from company-like headline phrases and known large technology company names
+- industries such as AI Agents, AI Infrastructure, Database, Developer Tools, Fintech, Cybersecurity, Health Tech, Robotics, Mobility, Climate Tech, Enterprise SaaS, Chips, and Venture Capital
+- event types such as Funding, Acquisition, IPO, Product Launch, Partnership, Layoffs, Regulation, Legal, and Security Incident
+
+The Cron/script ingestion path writes signals to `story_signals`. The no-database preview path derives the same signals in memory.
 
 ## Frontend Shape
 
@@ -58,6 +67,7 @@ Story clustering is currently simple lexical matching in `lib/news.ts` and `scri
 - `app/news-stream.tsx` owns the search box and scrolling merged story feed.
 - The UI is intentionally restrained and Google-like: top search input, then link-first news stream.
 - Each story displays a primary title link and one or more source links underneath.
+- Each story now displays signal chips for event/company/industry and a `Heat +N` indicator when merged or duplicate links increase story heat.
 
 ## API Shape
 
@@ -81,6 +91,23 @@ Story clustering is currently simple lexical matching in `lib/news.ts` and `scri
       "primaryCategory": "Latest",
       "publishedAt": "2026-04-25T21:43:37.000Z",
       "firstSeenAt": "2026-04-25T21:55:31.828Z",
+      "heat": 2,
+      "signals": [
+        {
+          "type": "event",
+          "label": "Funding",
+          "slug": "funding",
+          "confidence": 0.9,
+          "evidence": "Example story raises $25M Startups"
+        },
+        {
+          "type": "company",
+          "label": "Example",
+          "slug": "example",
+          "confidence": 0.88,
+          "evidence": "Example story raises $25M"
+        }
+      ],
       "sources": [
         {
           "id": "1",
@@ -127,13 +154,14 @@ node -e "fetch('https://startup-radar-live.onrender.com/api/news?limit=20').then
 - Added VentureBeat ingestion.
 - Added story-level clustering and source-link grouping.
 - Added deployment-safe ingestion scripts.
+- Added story-level event signal extraction and signal chips.
 - Verified the live site and API return the merged story shape.
 
 ## Next Safe Development Ideas
 
 - Add more sources such as The Information, Axios Pro Rata, Crunchbase News, or CNBC TechCheck where RSS/licensing allows.
-- Improve dedupe with embeddings or entity extraction.
-- Add company/entity extraction and sector tags.
+- Improve dedupe with embeddings.
+- Replace heuristic company/entity extraction with LLM-backed normalization.
 - Add story summaries and signal scoring.
 - Add a backstage admin/debug page for fetch runs and source health.
 - Monitor the paid Render Cron Job and add alerting for repeated feed failures.

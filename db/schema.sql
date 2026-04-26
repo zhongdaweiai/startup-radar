@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS article_categories (
   PRIMARY KEY (article_id, category)
 );
 
+CREATE TABLE IF NOT EXISTS story_signals (
+  story_id BIGINT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  signal_type TEXT NOT NULL CHECK (signal_type IN ('company', 'industry', 'event')),
+  slug TEXT NOT NULL,
+  label TEXT NOT NULL,
+  confidence NUMERIC(4, 3) NOT NULL DEFAULT 0.500,
+  evidence TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (story_id, signal_type, slug)
+);
+
 CREATE TABLE IF NOT EXISTS fetch_runs (
   id BIGSERIAL PRIMARY KEY,
   source_feed_id BIGINT NOT NULL REFERENCES source_feeds(id) ON DELETE CASCADE,
@@ -86,6 +98,12 @@ CREATE INDEX IF NOT EXISTS articles_primary_category_idx
 
 CREATE INDEX IF NOT EXISTS article_categories_category_idx
   ON article_categories (category);
+
+CREATE INDEX IF NOT EXISTS story_signals_type_slug_idx
+  ON story_signals (signal_type, slug);
+
+CREATE INDEX IF NOT EXISTS story_signals_story_id_idx
+  ON story_signals (story_id);
 
 CREATE INDEX IF NOT EXISTS articles_title_search_idx
   ON articles USING GIN (to_tsvector('english', title));

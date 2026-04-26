@@ -3,8 +3,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Pool } from "pg";
 import Parser from "rss-parser";
-import type { NewsItem, NewsSourceLink } from "@/app/news-stream";
+import type { NewsItem, NewsSourceLink, StorySignal } from "@/app/news-stream";
 import { fallbackNewsItems } from "./fallback-news";
+import { extractStorySignals as extractStorySignalsUntyped } from "./signal-extraction.mjs";
+import type { ExtractedStorySignal } from "./signal-types";
 
 type FeedDefinition = {
   name: string;
@@ -58,6 +60,8 @@ type StoryArticleRow = {
   articleId: string;
   storyTitle: string | null;
   storyCategory: string | null;
+  storySignals: unknown;
+  heat: string | number | null;
   sourceName: string;
   feedName: string;
   title: string;
@@ -77,6 +81,11 @@ type StoryCandidateRow = {
 const FEED_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 const FEED_FETCH_TIMEOUT_MS = 30 * 1000;
 const STORY_LOOKBACK_DAYS = 7;
+
+const extractSignals = extractStorySignalsUntyped as (input: {
+  title: string | null | undefined;
+  categories?: string[];
+}) => ExtractedStorySignal[];
 
 const DEFAULT_SOURCES: SourceDefinition[] = [
   {
@@ -489,6 +498,7 @@ function storyMatchesQuery(item: NewsItem, query: string) {
   const haystack = [
     item.title,
     item.primaryCategory,
+    ...item.signals.flatMap((signal) => [signal.type, signal.label, signal.slug]),
     ...item.sources.flatMap((source) => [
       source.sourceName,
       source.feedName,
@@ -518,6 +528,82 @@ function previewSource(article: ArticlePreview): NewsSourceLink {
   };
 }
 
+function storySignalsFor(title: string, categories: string[]) {
+  return extractSignals({ title, categories });
+}
+
+function mergeSignals(left: StorySignal[], right: ExtractedStorySignal[]) {
+  const byKey = new Map<string, StorySignal>();
+
+  for (const signal of [...left, ...right]) {
+    const key = `${signal.type}:${signal.slug}`;
+    const existing = byKey.get(key);
+
+    if (!existing || signal.confidence > existing.confidence) {
+      byKey.set(key, signal);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((leftSignal, rightSignal) => {
+    const rank = { event: 0, company: 1, industry: 2 };
+    const byType = rank[leftSignal.type] - rank[rightSignal.type];
+    if (byType !== 0) {
+      return byType;
+    }
+
+    return (
+      rightSignal.confidence - leftSignal.confidence ||
+      leftSignal.label.localeCompare(rightSignal.label)
+    );
+  });
+}
+
+function normalizeStorySignals(value: unknown): StorySignal[] {
+  if (typeof value === "string") {
+    try {
+      return normalizeStorySignals(JSON.parse(value));
+    } catch {
+      return [];
+    }
+  }
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const type = record.type;
+      const label = record.label;
+      const slug = record.slug;
+
+      if (
+        (type !== "company" && type !== "industry" && type !== "event") ||
+        typeof label !== "string" ||
+        typeof slug !== "string"
+      ) {
+        return null;
+      }
+
+      const confidence = Number(record.confidence);
+
+      return {
+        type,
+        label,
+        slug,
+        confidence: Number.isFinite(confidence) ? confidence : 0.5,
+        evidence:
+          typeof record.evidence === "string" ? record.evidence : null,
+      } satisfies StorySignal;
+    })
+    .filter((signal): signal is StorySignal => Boolean(signal));
+}
+
 function clusterPreviewArticles(articles: ArticlePreview[]) {
   const sortedArticles = [...articles].sort((a, b) => {
     const left = new Date(a.publishedAt ?? a.firstSeenAt).getTime();
@@ -537,6 +623,11 @@ function clusterPreviewArticles(articles: ArticlePreview[]) {
       if (!existingStory.sources.some((source) => source.url === article.url)) {
         existingStory.sources.push(previewSource(article));
       }
+      existingStory.heat += 1;
+      existingStory.signals = mergeSignals(
+        existingStory.signals,
+        storySignalsFor(article.title, article.categories),
+      );
       continue;
     }
 
@@ -546,6 +637,8 @@ function clusterPreviewArticles(articles: ArticlePreview[]) {
       primaryCategory: article.primaryCategory,
       publishedAt: article.publishedAt,
       firstSeenAt: article.firstSeenAt,
+      heat: 1,
+      signals: storySignalsFor(article.title, article.categories),
       sources: [previewSource(article)],
       terms,
     });
@@ -557,6 +650,8 @@ function clusterPreviewArticles(articles: ArticlePreview[]) {
     primaryCategory: story.primaryCategory,
     publishedAt: story.publishedAt,
     firstSeenAt: story.firstSeenAt,
+    heat: story.heat,
+    signals: story.signals,
     sources: story.sources,
   }));
 }
@@ -728,6 +823,49 @@ async function upsertStory(
   return result.rows[0]?.id ?? null;
 }
 
+async function upsertStorySignals(
+  activePool: Pool,
+  storyId: number | null,
+  title: string,
+  categories: string[],
+) {
+  if (!storyId) {
+    return;
+  }
+
+  const signals = storySignalsFor(title, categories);
+
+  for (const signal of signals) {
+    await activePool.query(
+      `
+        INSERT INTO story_signals (
+          story_id,
+          signal_type,
+          slug,
+          label,
+          confidence,
+          evidence
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (story_id, signal_type, slug)
+        DO UPDATE SET
+          label = EXCLUDED.label,
+          confidence = GREATEST(story_signals.confidence, EXCLUDED.confidence),
+          evidence = COALESCE(EXCLUDED.evidence, story_signals.evidence),
+          updated_at = now()
+      `,
+      [
+        storyId,
+        signal.type,
+        signal.slug,
+        signal.label,
+        signal.confidence,
+        signal.evidence,
+      ],
+    );
+  }
+}
+
 async function recordFeedRun(
   activePool: Pool,
   feedId: number,
@@ -779,6 +917,7 @@ async function ingestFeed(
           primaryCategory,
           publishedAt,
         );
+        await upsertStorySignals(activePool, storyId, title, categories);
 
         const result = await activePool.query<{ id: number }>(
           `
@@ -1043,10 +1182,15 @@ function serializeStoryRows(rows: StoryArticleRow[]) {
         primaryCategory: row.storyCategory ?? row.primaryCategory,
         publishedAt: iso(row.publishedAt),
         firstSeenAt: new Date(row.firstSeenAt).toISOString(),
+        heat: Number(row.heat ?? 1),
+        signals: normalizeStorySignals(row.storySignals),
         sources: [source],
       });
       continue;
     }
+
+    existing.heat = Math.max(existing.heat, Number(row.heat ?? 1));
+    existing.signals = mergeSignals(existing.signals, normalizeStorySignals(row.storySignals));
 
     if (!existing.sources.some((candidate) => candidate.url === source.url)) {
       existing.sources.push(source);
@@ -1085,6 +1229,38 @@ async function queryStoryRows(
           articles.id::text AS "articleId",
           stories.canonical_title AS "storyTitle",
           stories.primary_category AS "storyCategory",
+          COALESCE(
+            (
+              SELECT jsonb_agg(
+                jsonb_build_object(
+                  'type', story_signals.signal_type,
+                  'label', story_signals.label,
+                  'slug', story_signals.slug,
+                  'confidence', story_signals.confidence::float,
+                  'evidence', story_signals.evidence
+                )
+                ORDER BY
+                  CASE story_signals.signal_type
+                    WHEN 'event' THEN 1
+                    WHEN 'company' THEN 2
+                    ELSE 3
+                  END,
+                  story_signals.confidence DESC,
+                  story_signals.label
+              )
+              FROM story_signals
+              WHERE story_signals.story_id = stories.id
+            ),
+            '[]'::jsonb
+          ) AS "storySignals",
+          COALESCE(
+            (
+              SELECT count(*)::text
+              FROM articles AS story_articles
+              WHERE story_articles.story_id = stories.id
+            ),
+            '1'
+          ) AS "heat",
           sources.name AS "sourceName",
           source_feeds.name AS "feedName",
           articles.title,
@@ -1103,6 +1279,15 @@ async function queryStoryRows(
           OR sources.name ILIKE $1
           OR COALESCE(articles.author, '') ILIKE $1
           OR COALESCE(articles.primary_category, '') ILIKE $1
+          OR EXISTS (
+            SELECT 1
+            FROM story_signals
+            WHERE story_signals.story_id = stories.id
+              AND (
+                story_signals.label ILIKE $1
+                OR story_signals.signal_type ILIKE $1
+              )
+          )
         ORDER BY
           COALESCE(stories.published_at, articles.published_at, articles.first_seen_at) DESC,
           COALESCE(articles.published_at, articles.first_seen_at) DESC
@@ -1114,6 +1299,38 @@ async function queryStoryRows(
           articles.id::text AS "articleId",
           stories.canonical_title AS "storyTitle",
           stories.primary_category AS "storyCategory",
+          COALESCE(
+            (
+              SELECT jsonb_agg(
+                jsonb_build_object(
+                  'type', story_signals.signal_type,
+                  'label', story_signals.label,
+                  'slug', story_signals.slug,
+                  'confidence', story_signals.confidence::float,
+                  'evidence', story_signals.evidence
+                )
+                ORDER BY
+                  CASE story_signals.signal_type
+                    WHEN 'event' THEN 1
+                    WHEN 'company' THEN 2
+                    ELSE 3
+                  END,
+                  story_signals.confidence DESC,
+                  story_signals.label
+              )
+              FROM story_signals
+              WHERE story_signals.story_id = stories.id
+            ),
+            '[]'::jsonb
+          ) AS "storySignals",
+          COALESCE(
+            (
+              SELECT count(*)::text
+              FROM articles AS story_articles
+              WHERE story_articles.story_id = stories.id
+            ),
+            '1'
+          ) AS "heat",
           sources.name AS "sourceName",
           source_feeds.name AS "feedName",
           articles.title,

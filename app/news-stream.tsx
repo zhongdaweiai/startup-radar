@@ -2,6 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { NewsRefreshStatus } from "@/lib/news";
+import type { ExtractedStorySignal } from "@/lib/signal-types";
+
+export type StorySignal = ExtractedStorySignal;
 
 export type NewsItem = {
   id: string;
@@ -9,6 +12,8 @@ export type NewsItem = {
   primaryCategory: string | null;
   publishedAt: string | null;
   firstSeenAt: string;
+  heat: number;
+  signals: StorySignal[];
   sources: NewsSourceLink[];
 };
 
@@ -81,6 +86,33 @@ function sourceLabel(item: NewsItem) {
   }
 
   return `${names.length} sources`;
+}
+
+function signalLabel(signal: StorySignal) {
+  if (signal.type === "event") {
+    return `Event · ${signal.label}`;
+  }
+
+  if (signal.type === "company") {
+    return `Company · ${signal.label}`;
+  }
+
+  return `Industry · ${signal.label}`;
+}
+
+function signalClassName(signal: StorySignal) {
+  const base =
+    "inline-flex h-6 max-w-full items-center rounded-full border px-2.5 text-xs font-medium";
+
+  if (signal.type === "event") {
+    return `${base} border-[#c6dafc] bg-[#e8f0fe] text-[#174ea6]`;
+  }
+
+  if (signal.type === "company") {
+    return `${base} border-[#c4e8ca] bg-[#e6f4ea] text-[#137333]`;
+  }
+
+  return `${base} border-[#f5d997] bg-[#fef7e0] text-[#8a5a00]`;
 }
 
 export function NewsStream({
@@ -244,6 +276,12 @@ export function NewsStream({
                           <span>{item.sources.length} links merged</span>
                         </>
                       ) : null}
+                      {item.heat > 1 ? (
+                        <>
+                          <span>·</span>
+                          <span>Heat +{item.heat - 1}</span>
+                        </>
+                      ) : null}
                     </div>
                     <a
                       className="text-[17px] font-medium leading-6 text-[#1a0dab] underline-offset-2 hover:underline"
@@ -253,6 +291,19 @@ export function NewsStream({
                     >
                       {item.title}
                     </a>
+                    {item.signals.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        {item.signals.slice(0, 8).map((signal) => (
+                          <span
+                            className={signalClassName(signal)}
+                            key={`${item.id}:${signal.type}:${signal.slug}`}
+                            title={signal.evidence ?? signal.label}
+                          >
+                            <span className="truncate">{signalLabel(signal)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                       {item.sources.map((source) => (
                         <a
